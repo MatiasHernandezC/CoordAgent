@@ -1,13 +1,76 @@
 \section{Definición del proyecto}
 
+Tal como se adelantaba, en este proyecto se busca la creación de un agenete conversacional capaz de transformear conversaciones desestructuradas en decisiones grupales concretas, optimizando la coordinación de equipos mediante un análisis de disponibilidad, preferencias y restricciones.
+
 \subsection{Identificación del problema u oportunidad}
 
-b
+En entornos organizacionales, la coordinación de actividades grupales (como reuniones, planificación de tareas o eventos de equipo) se realiza comúnmente a través de herramientas de comunicación generalistas como WhatsApp, correo electrónico o plataformas de mensajería colaborativa. Sin embargo, estas herramientas no están diseñadas para gestionar procesos de coordinación de manera estructurada. 
+
+
+Lo anterior genera múltiples ineficiencias operativas:
+
+\begin{enumerate}
+    \item \textbf{Fragmentación de la información:} La comunicación es desorganizada y queda distribuida en múltiples mensajes o canales.
+    
+    \item \textbf{Dificultad para consolidar disponibilidad:} Cuando una cantidad considerable de personas debe reunirse puede requerir múltiples rondas de preguntas y respuestas determinar la disponibilidad del grupo, lo que con una revisión manual puede ser costoso en terminos de tiempo.
+    
+    \item \textbf{Procesos iterativos y prolongados:} Toma tiempo alcanzar acuerdos, el que podría usarse en otras actividades que generen valor directos, es decir, hay un costo de oportunidad asociado.
+    
+    \item \textbf{Reagendamientos frecuentes:} La falta de visibilidad global sobre restricciones de los participantes provoca reprogramaciones frecuentes.
+    
+    \item \textbf{Dependencia de un coordinador central:} Habitualmente, una sola persona asume el rol de consolidar la información de manera manual, generando un cuello de botella y un costo de tiempo para dicha persona.
+\end{enumerate}
+
+Como consecuencia, se invierte una cantidad significativa de tiempo en tareas de coordinación, afectando la productividad y generando costos operacionales indirectos.
+
+
+Esto representa una oportunidad para desarrollar un sistema que permita estructurar y automatizar estos procesos mediante interfaces conversacionales, capaces de interpretar lenguaje natural y transformar interacciones informales en decisiones concretas.
 
 \subsection{Justificación del propósito}
 
-c
+El proyecto tiene un propósito principalmente comercial, orientado a mejorar la eficiencia operativa en equipos de trabajo y organizaciones.
+
+\subsubsection{Propuesta de valor}
+
+La propuesta de valor se centra en:
+
+\begin{enumerate}
+    \item \textbf{Automatización:} Automatizar la toma de decisiones grupales en base a disponibilidad y restricciones
+    
+    \item \textbf{Ahorro de tiempo:} Reducir el tiempo destinado a la coordinación de reuniones y actividades.
+    
+    \item \textbf{Reducción de fricción:} Disminuye la fricción en la comunicación interna.
+    
+    \item \textbf{Accesibilidad:} Al ser usado en lenguaje natural no requiere una capacitación técnica por parte de los usuarios.
+\end{enumerate}
+
+El sistema permite capturar información incompleta o distribuida y consolidarla en resultados concretos, generando ahorros de tiempo y mejoras en productividad.
+
+\subsubsection{Modelo de ingresos propuesto}
+
+\begin{enumerate}
+    \item Software as a service (SaaS) para equipos y organizaciones.
+    \item Suscripción mensual por usuario o por equipo.
+    \item Integración con herramientas corporativas
+    \item Funcionalidades premium como:
+    \begin{itemize}
+        \item Optimización automática de horarios.
+        \item Análisis de eficicencia en reuniones.
+        \item Gestión avanzada de equipos y disponibilidad.
+    \end{itemize}
+\end{enumerate}
 
 \subsection{Planteamiento de los objetivos del proyecto}
 
-d
+\subsubsection{Objetivo General}
+
+Desarrollar un agente basado en LLM capaz de recibir entradas en lenguaje natural analizarlas y tansformarlas en decisiones concretas, esto a través del ofrecimiento de opciones según disponibilidad, preferencias y restricciones temporales de los usuarios.
+
+\subsubsection{Objetivos específicos}
+
+\begin{enumerate}
+    \item Diseñar la arquitectura del modelo que permita una persistencia eficiente y una utilidad óptima de cara al usuario.
+    \item Implementar el diseño inicial del MVP, revisando el funcionamiento básico del mismo en un entorno local seguro.
+    \item Diseñar mecanismos de guardrails que limiten el comportamiento del LLM al dominio de coordinación, previniendo lo más posible las alucinaciones y los promts maliciosos.
+    \item Evaluar el sistema en un entorno real mediante pruebas con casos de uso, midiendo la precisión de la decisión propuesta y la satisfacción del usuario.
+\end{enumerate}
