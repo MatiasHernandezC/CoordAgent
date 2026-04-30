@@ -1,0 +1,61 @@
+\documentclass[letterpaper,12pt]{article}
+
+% Librerías a utilizar
+\usepackage[utf8]{inputenc}	% Codificación 
+\usepackage[T1]{fontenc}
+\usepackage[style=apa, backend=biber, language=spanish]{biblatex}
+\usepackage{graphicx}		% Igenes
+\usepackage{indentfirst}		% Sangría
+\usepackage{amsmath, amsfonts, amssymb}	% Figuras matemáticas
+\usepackage{xurl}    % URL
+\usepackage{hyperref}
+\usepackage{csquotes}
+\usepackage{booktabs}
+\usepackage{placeins}
+\usepackage{tabularx}
+\usepackage[spanish,es-tabla]{babel}	% Idioma
+\addbibresource{bibliografia.bib}
+
+\usepackage[left=3cm,right=3cm,top=2.54cm,bottom=2.54cm]{geometry}
+\usepackage{multirow}
+
+\setlength{\parindent}{2cm}	% Sangría en los párrafos
+\renewcommand{\baselinestretch}{1.5}	% Interlineado
+
+% Renombrar ciertos títulos del texto
+\renewcommand\spanishcontentsname{Tabla de contenidos}
+\renewcommand\spanishrefname{Bibliografía}
+
+% Inicio del documento
+\begin{document}
+
+\input{portada.tex}
+
+\newpage
+
+\include{chapters/0-resumen}
+
+\normalsize
+\tableofcontents
+\thispagestyle{empty}
+
+\newpage
+\renewcommand{\thepage}{\arabic{page}}
+\setcounter{page}{1}
+
+% Capítulos
+\include{chapters/1-introduccion}
+\include{chapters/2-definicion}
+\include{chapters/3-factibilidad}
+\include{chapters/4-metodologia}
+\include{chapters/5-diseño}
+\include{chapters/6-minidemo}
+\include{chapters/7-conclusion}
+
+\clearpage
+\addcontentsline{toc}{section}{Bibliografía}
+\printbibliography
+
+\include{chapters/5-Anexo}
+
+\end{document}
