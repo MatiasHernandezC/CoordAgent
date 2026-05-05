@@ -1,0 +1,13 @@
+backend/.venv/
+backend/.pytest_cache/
+backend/data/sessions.json
+
+**/__pycache__/
+*.py[cod]
+
+frontend/node_modules/
+frontend/dist/
+
+.env
+backend/.env
+*.log
