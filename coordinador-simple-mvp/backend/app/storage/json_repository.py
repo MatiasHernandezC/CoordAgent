@@ -1,13 +1,14 @@
-﻿import json
+import json
 from json import JSONDecodeError
 from pathlib import Path
 
 from app.schemas import Session
+from app.settings import settings
 
 
 class JsonRepository:
     def __init__(self, path: Path | None = None):
-        self.path = path or Path("data/sessions.json")
+        self.path = path or settings.data_file
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.write_text("{}", encoding="utf-8")
@@ -16,11 +17,13 @@ class JsonRepository:
         raw = self.path.read_text(encoding="utf-8-sig").strip()
         if not raw:
             return {}
+
         try:
             data = json.loads(raw)
         except JSONDecodeError:
             self._write({})
             return {}
+
         return data if isinstance(data, dict) else {}
 
     def _write(self, data: dict) -> None:
@@ -37,3 +40,6 @@ class JsonRepository:
         if raw is None:
             return None
         return Session.model_validate(raw)
+
+
+repository = JsonRepository()
