@@ -18,7 +18,80 @@ Se a decidido que para el desarrollo de este proyecto se utilizará la metodolog
 
 \subsubsection{Plan de iteraciones}
 
-a
+La planificación se realiza considerando las fechas de evaluación oficiales del curso. Se tomó en cuenta el estado actual del proyecto junto con el estado objetivo. Las primeras iteraciones se enfocan en consolidar el estado actual y realizar diferentes pruebas, mientras que los siguientes Sprints se enfocan en completar los elementos faltantes del MVP.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{p{2.7cm} p{2.5cm} X X}
+\toprule
+\textbf{Sprint} & \textbf{Fechas} & \textbf{Objetivo principal} & \textbf{Entregable esperado} \\
+\midrule
+
+Sprint 0: Formulación y prototipo inicial
+& 05/05 al 08/05
+& Definir la base conceptual, técnica y metodológica del proyecto.
+& Informe de Evaluación 1, presentación, repositorio y mini-demo funcional. \\
+
+\midrule
+
+Sprint 1: Consolidación del flujo principal
+& 09/05 al 22/05
+& Estabilizar el flujo conversación, extracción, revisión, cálculo y confirmación.
+& MVP parcial ejecutable localmente con flujo principal estable. \\
+
+\midrule
+
+Sprint 2: Avance funcional del MVP
+& 23/05 al 09/06
+& Preparar un avance demostrable equivalente al menos al 50\% del MVP.
+& Demo de Evaluación 2 con extracción, decisión sugerida y confirmación. \\
+
+\midrule
+
+Sprint 3: Integración con calendario y robustez
+& 10/06 al 23/06
+& Incorporar salida hacia calendario y mejorar la confiabilidad del sistema.
+& Decisión confirmada exportable o importable en calendario. \\
+
+\midrule
+
+Sprint 4: Guardrails, privacidad y cierre del MVP
+& 24/06 al 07/07
+& Completar el MVP comprometido y preparar evidencias finales.
+& Informe final, presentación, temario de demo y MVP completo. \\
+
+\midrule
+
+Buffer de defensa y respaldo
+& 08/07 al 09/07
+& Reducir riesgos técnicos durante la presentación final.
+& Demo final ensayada, respaldada y preparada para casos de falla. \\
+
+\bottomrule
+\end{tabularx}
+\caption{Planificación general de iteraciones del proyecto mediante Scrum.}
+\label{tab:planificacion-iteraciones}
+\end{table}
+
+\FloatBarrier
+
+De forma complementaria, las actividades específicas de cada Sprint se organizan de la siguiente manera:
+
+\begin{itemize}
+    \item \textbf{Sprint 0:} definición del problema, propósito comercial, objetivos, factibilidad, arquitectura inicial, roles Scrum, repositorio, demo mínima del LLM y planificación metodológica.
+
+    \item \textbf{Sprint 1:} revisión de endpoints, validación de esquemas de datos, ajuste de prompts, pruebas de extracción con LLM o fallback, mejora del manejo de errores, validación de corrección manual y conexión frontend-backend.
+
+    \item \textbf{Sprint 2:} preparación de un caso de uso realista, carga de conversación ejemplo, extracción de disponibilidades, visualización de participantes y datos faltantes, cálculo de mejores horarios, explicación de cobertura y confirmación de una opción.
+
+    \item \textbf{Sprint 3:} implementación de generación de evento en formato \texttt{.ics} o integración básica con Google Calendar, creación de endpoint de exportación, transformación de la opción confirmada en evento calendarizable y refuerzo de validaciones.
+
+    \item \textbf{Sprint 4:} pruebas con casos borde, entradas ambiguas, horarios incompatibles, participantes sin disponibilidad, errores del LLM, posibles prompt injections, documentación de privacidad, trazabilidad de funcionalidades, capturas, snippets y arquitectura final.
+
+    \item \textbf{Buffer:} ensayo de demo, preparación de datos precargados, capturas alternativas, respaldo del evento de calendario, script de presentación y preparación de respuestas ante preguntas del profesor.
+\end{itemize}
 
 \subsubsection{Roles del equipo y tareas asociadas}
 
@@ -32,7 +105,7 @@ a
     \item Desarrollador frontend - Daniel Eguiluz: Encargado del diseño e implementación de la interfaz para los usuarios y para el consumo del backend.
 \end{enumerate}
 
-Para la selección de estos roles y respectivas tareas se tomaron en cuenta los trabajos previos realizados por cada miembro, de forma que vaya acorde a sus áreas de especialización y así asegurar el cumplimiento de los objetivos del proyecto.
+Para la selección de estos roles y respectivas tareas se tomaron en cuenta los trabajos previos realizados por cada miembro, de forma que vaya acorde a sus áreas de especialización y así asegurar el cumplimiento de los objetivos del proyecto. Sin embargo debido a que SCRUM promueve que los integrantes contribuyan al incremento segun las necesidades de cada Sprint el equipo no se divide en áreas rígidas y el trabajo se realizara de manera colavorativa.
 
 
 \subsection{Diagrama de usos éticos de la IA (MyAI Compass)}
