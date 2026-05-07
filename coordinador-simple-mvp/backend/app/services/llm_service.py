@@ -6,49 +6,104 @@ from urllib.error import HTTPError
 import urllib.request
 
 from app.prompts.extraction_prompt import EXTRACTION_PROMPT
-from app.schemas import ChannelMessage, ExtractedAvailability, Participant, TimeSlot
+from app.schemas import (
+    ChannelMessage,
+    ExtractedAvailability,
+    Participant,
+    TimeSlot,
+    TokenUsage,
+)
 from app.settings import settings
 
 WEEKDAYS = ["lunes", "martes", "miercoles", "jueves", "viernes"]
 
+def estimate_gemini_cost(
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
+    input_cost = (
+        prompt_tokens / 1_000_000
+    ) * settings.gemini_input_price_per_million
+
+    output_cost = (
+        completion_tokens / 1_000_000
+    ) * settings.gemini_output_price_per_million
+
+    return round(input_cost + output_cost, 8)
 
 class LlmService:
     def __init__(self) -> None:
-        self._cache: dict[str, tuple[ExtractedAvailability, str]] = {}
+        self._cache: dict[
+            str,
+            tuple[ExtractedAvailability, str, TokenUsage | None]
+        ] = {}
 
-    def extract_availability(self, message: str) -> tuple[ExtractedAvailability, str]:
+    def extract_availability(self, message: str) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         cache_key = build_cache_key(message)
         if settings.llm_cache_enabled and cache_key in self._cache:
-            cached_extraction, cached_source = self._cache[cache_key]
-            return cached_extraction.model_copy(deep=True), f"{cached_source}_cache"
+            cached_extraction, cached_source, cached_tokens = self._cache[cache_key]
+
+            return (
+                cached_extraction.model_copy(deep=True),
+                f"{cached_source}_cache",
+                cached_tokens,
+            )
 
         if settings.llm_provider == "local":
             try:
-                return self._remember(cache_key, self._extract_with_local_model(message), f"local_{settings.local_llm_model}")
+                return self._remember(cache_key, self._extract_with_local_model(message), f"local_{settings.local_llm_model}", None)
             except Exception:
                 fallback = self._extract_with_mock_rules(message)
-                return self._remember(cache_key, fallback, f"mock_fallback_local_{settings.local_llm_model}")
+                return self._remember(cache_key, fallback, f"mock_fallback_local_{settings.local_llm_model}", None)
 
         if settings.llm_provider == "gemini":
             try:
-                return self._remember(cache_key, self._extract_with_gemini(message), f"gemini_{settings.gemini_model}")
-            except Exception:
-                fallback = self._extract_with_mock_rules(message)
-                return self._remember(cache_key, fallback, f"mock_fallback_gemini_{settings.gemini_model}")
+                extraction, token_usage = self._extract_with_gemini(message)
 
+                print(
+                    f"[TOKENS] "
+                    f"prompt={token_usage.prompt_tokens} "
+                    f"completion={token_usage.completion_tokens} "
+                    f"total={token_usage.total_tokens} "
+                    f"cost=${token_usage.estimated_cost_usd}"
+                )
+
+                return self._remember(
+                    cache_key,
+                    extraction,
+                    f"gemini_{settings.gemini_model}",
+                    token_usage,
+                )
+
+            except Exception as error:
+                print("\n========== GEMINI ERROR ==========")
+                print(str(error))
+                print("==================================\n")
+
+                fallback = self._extract_with_mock_rules(message)
+
+                return self._remember(
+                    cache_key,
+                    fallback,
+                    f"mock_fallback_gemini_{settings.gemini_model}",
+                    None
+                )
         if settings.llm_provider == "ollama":
             try:
-                return self._remember(cache_key, self._extract_with_ollama(message), "ollama")
+                return self._remember(cache_key, self._extract_with_ollama(message), "ollama", None)
             except Exception:
                 fallback = self._extract_with_mock_rules(message)
-                return self._remember(cache_key, fallback, "mock_fallback")
+                return self._remember(cache_key, fallback, "mock_fallback", None)
 
-        return self._remember(cache_key, self._extract_with_mock_rules(message), "mock")
+        return self._remember(cache_key, self._extract_with_mock_rules(message), "mock", None)
 
-    def extract_channel_availability(self, messages: list[ChannelMessage]) -> tuple[ExtractedAvailability, str]:
+    def extract_channel_availability(
+        self,
+        messages: list[ChannelMessage]
+    ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         transcript = build_channel_extraction_text(messages)
-        extraction, source = self.extract_availability(transcript)
-        return extraction, f"channel_{source}"
+        extraction, source, token_usage = self.extract_availability(transcript)
+        return extraction, f"channel_{source}", token_usage
 
     def _extract_with_ollama(self, message: str) -> ExtractedAvailability:
         payload = {
@@ -102,7 +157,10 @@ class LlmService:
         parsed = json.loads(extract_json(result.stdout))
         return ExtractedAvailability.model_validate(parsed)
 
-    def _extract_with_gemini(self, message: str) -> ExtractedAvailability:
+    def _extract_with_gemini(
+        self,
+        message: str,
+    ) -> tuple[ExtractedAvailability, TokenUsage]:
         if not settings.gemini_api_key:
             raise ValueError("Falta GEMINI_API_KEY")
 
@@ -118,7 +176,9 @@ class LlmService:
                 "responseMimeType": "application/json",
             },
         }
+
         url = settings.gemini_url.format(model=settings.gemini_model)
+
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -130,16 +190,46 @@ class LlmService:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=settings.gemini_timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=settings.gemini_timeout_seconds,
+            ) as response:
                 raw = json.loads(response.read().decode("utf-8"))
+
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Gemini API error {error.code}: {detail}") from error
+
+            raise RuntimeError(
+                f"Gemini API error {error.code}: {detail}"
+            ) from error
 
         content = extract_gemini_text(raw)
-        parsed = json.loads(extract_json(content))
-        return ExtractedAvailability.model_validate(parsed)
 
+        parsed = json.loads(extract_json(content))
+
+        extraction = ExtractedAvailability.model_validate(parsed)
+
+        usage = raw.get("usageMetadata", {})
+
+        prompt_tokens = usage.get("promptTokenCount", 0)
+
+        completion_tokens = usage.get("candidatesTokenCount", 0)
+
+        total_tokens = usage.get("totalTokenCount", 0)
+
+        token_usage = TokenUsage(
+            provider="gemini",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            estimated_cost_usd=estimate_gemini_cost(
+                prompt_tokens,
+                completion_tokens,
+            ),
+        )
+
+        return extraction, token_usage
+    
     def _extract_with_mock_rules(self, message: str) -> ExtractedAvailability:
         participants: dict[str, Participant] = {}
         fragments = re.split(r",|;|\by\b|\bpero\b", message, flags=re.IGNORECASE)
@@ -159,13 +249,19 @@ class LlmService:
         cache_key: str,
         extraction: ExtractedAvailability,
         source: str,
-    ) -> tuple[ExtractedAvailability, str]:
+        token_usage: TokenUsage | None = None,
+    ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         if settings.llm_cache_enabled:
             if len(self._cache) >= settings.llm_cache_max_items:
                 oldest_key = next(iter(self._cache))
                 self._cache.pop(oldest_key, None)
-            self._cache[cache_key] = (extraction.model_copy(deep=True), source)
-        return extraction, source
+            self._cache[cache_key] = (
+                extraction.model_copy(deep=True),
+                source,
+                token_usage,
+            )
+
+        return extraction, source, token_usage
 
 
 def detect_name(fragment: str) -> str | None:

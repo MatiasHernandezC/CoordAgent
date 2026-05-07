@@ -55,9 +55,14 @@ def get_session(session_id: str):
 @router.post("/sessions/{session_id}/message", response_model=MessageResponse)
 def add_message(session_id: str, payload: MessageRequest):
     started = perf_counter()
-    extraction, source = llm_service.extract_availability(payload.message)
+    extraction, source, token_usage = llm_service.extract_availability(payload.message)
     session = session_service.merge_extraction(session_id, extraction, payload.message, source)
-    return MessageResponse(session=session, llm_source=source, elapsed_ms=elapsed_ms(started))
+    return MessageResponse(
+        session=session,
+        llm_source=source,
+        elapsed_ms=elapsed_ms(started),
+        token_usage=token_usage,
+    )
 
 
 @router.post("/sessions/{session_id}/participants")
@@ -111,7 +116,9 @@ def invoke_channel_if_needed(
     if not invoked:
         return ChannelMessageResponse(session=session, invoked=False, elapsed_ms=elapsed_ms(started))
 
-    extraction, source = llm_service.extract_channel_availability(session.channel_messages)
+    extraction, source, token_usage = llm_service.extract_channel_availability(
+        session.channel_messages
+    )
     session = session_service.merge_extraction(
         session_id,
         extraction,
@@ -128,6 +135,7 @@ def invoke_channel_if_needed(
         llm_source=source,
         agent_reply=reply,
         elapsed_ms=elapsed_ms(started),
+        token_usage=token_usage,
     )
 
 

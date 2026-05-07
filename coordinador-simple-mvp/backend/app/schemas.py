@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 Day = Literal["lunes", "martes", "miercoles", "jueves", "viernes"]
 SessionStatus = Literal["draft", "calculated", "confirmed"]
 
+class TokenUsage(BaseModel):
+    provider: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
 
 class TimeSlot(BaseModel):
     day: Day
@@ -93,6 +99,7 @@ class MessageResponse(BaseModel):
     session: Session
     llm_source: str
     elapsed_ms: int = 0
+    token_usage: TokenUsage | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -134,6 +141,7 @@ class ChannelMessageResponse(BaseModel):
     llm_source: str | None = None
     agent_reply: str | None = None
     elapsed_ms: int = 0
+    token_usage: TokenUsage | None = None
 
 
 class RuntimeInfo(BaseModel):

@@ -43,7 +43,14 @@ class Settings:
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
     )
     gemini_timeout_seconds: int = env_int("GEMINI_TIMEOUT_SECONDS", 45)
+    
+    gemini_input_price_per_million: float = float(
+        os.getenv("GEMINI_INPUT_PRICE_PER_MILLION", "0.10")
+    )
 
+    gemini_output_price_per_million: float = float(
+        os.getenv("GEMINI_OUTPUT_PRICE_PER_MILLION", "0.40")
+    )
     @property
     def cors_origins(self) -> list[str]:
         raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
