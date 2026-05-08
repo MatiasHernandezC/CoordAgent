@@ -7,7 +7,7 @@ Para comprobar la factibilidad técnica del proyecto se ha implementado una mini
 
 \subsubsection{LLM utilizado y justificación}
 
-Ya que el LLM es el núcleo del presente proyecto se análizaron unas cuantas opciones tanto por si se tenía que ejecutar en local o en la nube, específicamente para la minidemo, al ser algo inicial y para mantener cierto nivel de seguridad se optó por usar un modelo corriendo en local, específicamente el modelo \textbf{Qwen3-4B-Instruct-2507-Q4-K-M}, el cual cuenta, como dice su nombre con aproximadamente 4B (4 mil millones) de parámetros alcanzando apróximadamente 2.5 GB.
+Ya que el LLM es el núcleo del presente proyecto se análizaron unas cuantas opciones tanto por si se tenía que ejecutar en local o en la nube, específicamente para la minidemo, al ser algo inicial y para mantener cierto nivel de seguridad primero se optó por usar un modelo corriendo en local, específicamente el modelo \textbf{Qwen3-4B-Instruct-2507-Q4-K-M}, el cual cuenta, como dice su nombre con aproximadamente 4B (4 mil millones) de parámetros alcanzando apróximadamente 2.5 GB.
 
 Este modelo que para una máquina local es relativamente grande, pero fue elegido por:
 \begin{enumerate}
@@ -31,45 +31,12 @@ Algunos contras que tiene el tamaño de este modelo son:
 A pesar de dichas limitaciones sigue siendo factible en los dispositivos del equipo Charlie, por lo que los pros mencionados anteriormente parecen suficientes para justificar esta elección.
 
 
+Siguiendo con esta linea se realizaron pruebas sobre un modelo en la nube, con el fin de estimar costos de mejor manera y agregar una funcionalidad que muestre el costo asociado de forma visual en el frontend para tener claridad de posibles costos reales durante esta demostración inicial. El modelo utilizado para esto fue específicamente \textbf{gemini-2.5-flash-lite}.
+
+
 \subsubsection{Promt de personalización inicial}
 
-Para extraer la información de los distintos usuarios en un formato utilizable se realizó el siguiente promt de sistema:
-
-{\footnotesize
-\begin{verbatim}
-'''
-Extrae disponibilidad desde el mensaje del usuario.
-
-Devuelve SOLO JSON con esta forma:
-
-{
-  "participants": [
-    {
-      "name": "string",
-      "availability": [
-        {
-          "day": "lunes|martes|miercoles|jueves|viernes",
-          "start": "HH:MM",
-          "end": "HH:MM"
-        }
-      ]
-    }
-  ]
-}
-
-Reglas:
-- No inventes participantes.
-- No inventes dias si no aparecen.
-- Si dice "manana", usa 09:00-12:00.
-- Si dice "tarde", usa 15:00-18:00.
-- Si dice "desde las 16", usa 16:00-18:00.
-- Si dice "cualquier hora", usa 09:00-18:00.
-- Si dice "todos los dias", crea disponibilidad para lunes, martes, miercoles, jueves y viernes.
-- Si falta horario, deja availability vacio.
-- Responde solo JSON, sin markdown.  
-'''
-\end{verbatim}
-}
+Para extraer la información de los distintos usuarios respecto a sus disponibilidades y restricciones en un formato utilizable se realizó el promt de sistema \ref{lst:prompt_sistema} que puede ser visto en los anexos.
 
 \subsubsection{Presentación y exposición}
 
