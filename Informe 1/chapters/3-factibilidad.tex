@@ -2,17 +2,17 @@
 
 \subsection{Análisis técnico}
 
-El desarrollo de Coord-Agent requiere evaluar la viabilidad de sus funcionalidades principales: interpretación de lenguaje natural, extracción de disponibilidad y cálculo de horarios. Para ello se analizan las herramientas de desarrollo, los modelos de lenguaje, las APIs externas y los recursos computacionales necesarios.
+El desarrollo de Coord-Agent requiere evaluar la viabilidad de sus principales funcionalidades, particularmente la interpretación de lenguaje natural, la extracción de disponibilidad y el cálculo automático de horarios compatibles. Para ello, se analizan las herramientas de desarrollo utilizadas, los modelos de lenguaje considerados, las APIs externas involucradas y los recursos computacionales necesarios para ejecutar el sistema.
 
-En cuanto al stack tecnológico, el frontend se implementa en React 18 con TypeScript y Vite, lo que permite construir una SPA con actualización en tiempo real. El backend utiliza FastAPI con Uvicorn como servidor ASGI, siguiendo el patrón BFF (Backend for Frontend), que establece que el frontend nunca debe comunicarse directamente con el proveedor LLM. La validación de datos se realiza con Pydantic v2, asegurando consistencia estructural entre todos los módulos. Para el control de versiones se emplea GitHub.
+Respecto al stack tecnológico, el frontend se desarrolla utilizando React 18, TypeScript y Vite, tecnologías que permiten construir una SPA moderna con tiempos de respuesta rápidos y una experiencia de usuario fluida. El backend utiliza FastAPI con Uvicorn como servidor ASGI, siguiendo el patrón BFF (Backend for Frontend), que establece que el frontend nunca debe comunicarse directamente con el proveedor LLM. La validación de datos se realiza con Pydantic v2, asegurando consistencia estructural entre todos los módulos. Para el control de versiones se emplea GitHub.
 
-Respecto al modelo de lenguaje, el sistema soporta múltiples proveedores configurables mediante variables de entorno, lo que otorga flexibilidad para desarrollo, pruebas y demostración. Como proveedor principal se utiliza Gemini 3.0 Flash de Google, accedido mediante API REST con autenticación por clave almacenada en el archivo \texttt{.env} del backend y temperatura 0,1, dado que la tarea requiere extracción precisa, no creatividad. La salida se fuerza en formato JSON mediante \texttt{responseMimeType}. Como alternativa local se utiliza Qwen3-4B-Instruct en formato GGUF (Q4\_K\_M) ejecutado mediante \texttt{llama.cpp}. Además, el sistema cuenta con integración opcional mediante Ollama y un modo mock basado en reglas para desarrollo rápido. Ante fallos del proveedor configurado, el backend conmuta automáticamente a un extractor por reglas, garantizando continuidad operativa.
+Respecto al modelo de lenguaje, el sistema soporta múltiples proveedores configurables mediante variables de entorno, lo que otorga flexibilidad para desarrollo, pruebas y demostración. Como proveedor principal se utiliza Gemini 2.5 Flash de Google, seleccionado por su bajo costo operativo y buenos tiempos de respuesta para tareas de extracción semántica, accedido mediante API REST con autenticación por clave almacenada en el archivo \texttt{.env} del backend y temperatura 0,1, dado que la tarea requiere extracción precisa, no creatividad. La salida se fuerza en formato JSON mediante \texttt{responseMimeType}. Como alternativa local se utiliza Qwen3-4B-Instruct en formato GGUF (Q4\_K\_M) ejecutado mediante \texttt{llama.cpp}. Además, el sistema cuenta con integración opcional mediante Ollama y un modo mock basado en reglas para desarrollo rápido. Ante fallos del proveedor configurado, el backend conmuta automáticamente a un extractor por reglas, garantizando continuidad operativa.
 
 La arquitectura del MVP separa estrictamente cinco módulos: el frontend en React, el BFF en FastAPI que expone endpoints REST para sesiones, mensajes, cálculo y confirmación, el LLM Service encargado exclusivamente de convertir lenguaje natural en JSON estructurado, sin tomar decisiones, el Decision Engine motor Python determinista que cruza horarios y calcula las tres mejores opciones y el JSON Repository para persistencia simple en archivo. Esta separación garantiza que el LLM nunca decide y que, ante cualquier fallo del modelo, el usuario puede corregir datos manualmente y el motor opera igual.
 
 En cuanto a recursos computacionales, al delegar la inferencia a la API de Gemini, los requisitos son mínimos: una laptop con 8 a 16 GB de RAM sin GPU basta para el desarrollo. Para producción se proyecta una VM cloud básica AWS t3.small o GCP e2 medium. En caso de optar por el modelo local Qwen 3-4B GGUF, este requiere aproximadamente 3 a 4 GB de RAM y presenta tiempos de inferencia de 10 a 30 segundos por solicitud en CPU.
 
-Finalmente, en seguridad y privacidad se aplica minimización de datos solo se persiste información estructurada, no conversaciones completas, la clave de API nunca se expone al frontend, se implementa cifrado HTTPS en producción y se validan todas las salidas del LLM contra esquemas Pydantic. El prompt del sistema restringe el dominio a coordinación de actividades, filtrando solicitudes fuera de contexto. El análisis concluye que Coord-Agent es técnicamente factible dentro del semestre, con un stack accesible y una arquitectura modular que permite escalar sin rediseñar el núcleo.
+Finalmente, en seguridad y privacidad se aplica minimización de datos, solo se persiste información estructurada, no conversaciones completas, la clave de API nunca se expone al frontend, se implementa cifrado HTTPS en producción y se validan todas las salidas del LLM contra esquemas Pydantic. El prompt del sistema restringe el dominio a coordinación de actividades, filtrando solicitudes fuera de contexto. El análisis concluye que Coord-Agent es técnicamente factible dentro del semestre, con un stack accesible y una arquitectura modular que permite escalar sin rediseñar el núcleo.
 
 
 
@@ -48,7 +48,7 @@ Costo total de desarrollo & \$3.600.000 CLP \\ \hline
 \caption{Estimación de costos de desarrollo}
 \end{table}
 
-El costo anterior representa principalmente el esfuerzo de ingeniería asociado al diseño de arquitectura, desarrollo backend y frontend, integración con modelos LLM, pruebas funcionales, validaciones y despliegue inicial del sistema.
+El costo estimado representa principalmente el esfuerzo de ingeniería asociado al diseño de arquitectura, desarrollo del frontend y backend, integración con modelos LLM, pruebas funcionales y despliegue inicial del sistema.
 
 \subsubsection{Costos operacionales}
 
@@ -93,7 +93,7 @@ Costo mensual LLM por empresa & \$3 USD aprox. \\ \hline
 \caption{Estimación de costos asociados al consumo LLM}
 \end{table}
 
-Los resultados muestran que el costo variable asociado al uso de modelos de lenguaje resulta extremadamente bajo en comparación al valor funcional entregado por el sistema.
+Las pruebas realizadas muestran que el costo asociado al uso de modelos de lenguaje es relativamente bajo en comparación con el valor funcional que entrega el sistema.
 
 \subsubsection{Costo total estimado}
 
@@ -160,7 +160,7 @@ Costo operacional mensual & \$145.000 CLP \\ \hline
 Precio mensual promedio por empresa & \$35.000 CLP \\ \hline
 Margen operacional estimado & 70\% -- 85\% \\ \hline
 Empresas necesarias para cubrir operación mensual & 5 empresas aprox. \\ \hline
-Empresas-mes para recuperar inversión inicial & 103 empresas-mes aprox. \\ \hline
+Empresas-mes estimadas para recuperar inversión & 103 empresas-mes aprox. \\ \hline
 \end{tabular}
 \caption{Estimación de recuperación de inversión}
 \end{table}
@@ -176,7 +176,7 @@ Lo anterior implica que:
 
 \subsubsection{Escalabilidad económica del sistema}
 
-Uno de los principales atributos económicos del sistema es su bajo costo marginal por cliente adicional. La mayor parte de los costos operacionales corresponden a infraestructura base y mantención, mientras que el consumo asociado al procesamiento mediante modelos LLM representa un costo relativamente reducido incluso bajo escenarios de uso intensivo.
+Uno de los aspectos más favorables del sistema desde el punto de vista económico es su bajo costo marginal por cliente adicional. La mayor parte de los costos operacionales corresponden a infraestructura base y mantención, mientras que el consumo asociado al procesamiento mediante modelos LLM representa un costo relativamente reducido incluso bajo escenarios de uso intensivo.
 
 Debido a que la arquitectura propuesta utiliza servicios cloud escalables y procesamiento externo mediante APIs, el sistema puede aumentar progresivamente su capacidad sin requerir rediseños importantes de infraestructura.
 
@@ -239,6 +239,154 @@ Adicionalmente, el sistema presenta características de alta escalabilidad, ya q
 
 En consecuencia, desde un punto de vista económico, el proyecto resulta técnicamente viable y potencialmente sustentable en un contexto de comercialización real.
 
+
+
+
 \subsection{Evaluación de riesgos y limitaciones}
 
-g
+El uso de modelos de lenguaje dentro de Coord-Agent introduce distintos desafíos técnicos y operacionales que deben considerarse durante el desarrollo y futura operación del sistema.
+
+En esta sección se identifican los principales riesgos asociados al desarrollo y operación de Coord-Agent, junto con las limitaciones inherentes al alcance del MVP y a las tecnologías utilizadas.
+
+\subsubsection{Riesgos del proyecto}
+
+El desarrollo de Coord-Agent incorpora dependencias tecnológicas, operacionales y económicas que pueden afectar tanto la implementación como la operación futura del sistema. A continuación, se describen los principales riesgos identificados y las estrategias consideradas para mitigarlos.
+
+\paragraph{Dependencia de proveedores externos LLM:}
+
+Uno de los principales riesgos del sistema corresponde a la dependencia de APIs externas de modelos de lenguaje, particularmente Gemini. Cambios en disponibilidad, precios, límites de uso o políticas de acceso podrían impactar directamente el funcionamiento del sistema.
+
+Para mitigar este riesgo, la arquitectura fue diseñada con soporte multi-proveedor configurable mediante variables de entorno, permitiendo utilizar distintos modelos según disponibilidad. Adicionalmente, se implementó soporte para ejecución local mediante Qwen3-4B-Instruct y un sistema fallback basado en reglas que mantiene operativas las funcionalidades básicas incluso ante fallos del proveedor principal.
+
+\paragraph{Errores en interpretación de lenguaje natural:}
+
+Debido a que el sistema interpreta mensajes escritos en lenguaje natural mediante modelos LLM, existe la posibilidad de obtener extracciones ambiguas o incorrectas en ciertos escenarios.
+
+Este riesgo aumenta en mensajes poco estructurados, abreviaciones excesivas o redacción ambigua por parte de los usuarios.
+
+Para reducir este problema, el sistema:
+
+\begin{itemize}
+    \item Restringe el dominio del prompt exclusivamente a coordinación de horarios.
+    \item Fuerza respuestas estructuradas en formato JSON.
+    \item Valida todas las respuestas mediante esquemas Pydantic.
+    \item Permite corrección manual de disponibilidad antes del cálculo final.
+    \item Mantiene el motor de decisión separado del LLM.
+\end{itemize}
+
+De esta manera, el modelo de lenguaje actúa únicamente como extractor semántico y no como sistema autónomo de toma de decisiones.
+
+Además, debido a que los usuarios pueden redactar mensajes ambiguos o inconsistentes, el sistema incorpora reglas explícitas dentro del prompt de extracción para normalizar horarios, detectar negaciones, interpretar disponibilidad parcial y restringir el dominio únicamente a coordinación de actividades.
+
+Por ejemplo, el prompt fuerza respuestas exclusivamente en formato JSON estructurado, prohíbe inventar participantes y descarta instrucciones fuera del contexto de coordinación. Esto reduce significativamente errores derivados de prompt injection o instrucciones maliciosas enviadas por usuarios.
+
+\paragraph{Escalabilidad y aumento de costos:}
+
+A medida que aumenta la cantidad de usuarios concurrentes y consultas procesadas, podrían incrementarse los costos asociados al consumo de APIs LLM e infraestructura cloud.
+
+Sin embargo, debido al bajo costo por consulta observado durante las pruebas y al uso de arquitectura cloud escalable, se estima que el sistema puede soportar crecimiento moderado sin incrementos críticos de costos.
+
+Adicionalmente, el uso de caché y futuras estrategias de optimización de prompts permitirían reducir aún más el consumo de tokens.
+
+\paragraph{Disponibilidad y conectividad:}
+
+El sistema depende de conectividad a Internet para acceder a servicios cloud y proveedores de modelos LLM externos. Interrupciones de red o caídas del proveedor podrían afectar temporalmente el funcionamiento.
+
+Como mitigación, el sistema contempla:
+
+\begin{itemize}
+    \item Arquitectura desacoplada entre frontend, backend y proveedor LLM.
+    \item Manejo de errores y fallback automático.
+    \item Posibilidad de ejecución local mediante modelos open-source.
+\end{itemize}
+
+\paragraph{Seguridad y privacidad de datos:}
+
+El procesamiento de mensajes de usuarios implica riesgos asociados a privacidad y exposición de información sensible.
+
+Para minimizar este riesgo, el sistema considera:
+
+\begin{itemize}
+    \item Separación entre frontend y proveedor LLM mediante BFF.
+    \item Uso de HTTPS en producción.
+    \item Validación estructural de entradas y salidas.
+    \item Persistencia únicamente de información estructurada necesaria.
+    \item Protección de claves API mediante variables de entorno.
+\end{itemize}
+
+No obstante, debido a que el sistema utiliza servicios cloud externos, siempre existe un riesgo residual asociado al procesamiento de información mediante terceros.
+
+Adicionalmente, el prompt del sistema incorpora restricciones explícitas para impedir que mensajes de usuarios modifiquen instrucciones internas del modelo, soliciten información sensible o alteren el comportamiento esperado del extractor semántico.
+
+\subsubsection{Limitaciones del sistema}
+
+\paragraph{Alcance funcional del MVP:}
+
+El proyecto corresponde a un MVP (Minimum Viable Product), por lo que su alcance funcional es limitado respecto a plataformas comerciales completas.
+
+La versión actual se enfoca principalmente en:
+
+\begin{itemize}
+    \item Interpretación de disponibilidad horaria.
+    \item Coordinación básica de reuniones.
+    \item Procesamiento de mensajes en lenguaje natural.
+    \item Cálculo de coincidencias horarias.
+\end{itemize}
+
+No se contemplan funcionalidades avanzadas como autenticación empresarial compleja, integración nativa con calendarios corporativos o análisis avanzado de productividad.
+
+\paragraph{Dependencia del idioma y contexto:}
+
+El sistema fue diseñado y probado principalmente utilizando mensajes en español informal. Aunque los modelos LLM poseen capacidades multilingües, el comportamiento podría variar en otros idiomas o contextos culturales específicos.
+
+Además, expresiones ambiguas o altamente coloquiales podrían afectar la precisión de extracción.
+
+\paragraph{Limitaciones inherentes a modelos LLM:}
+
+A pesar de las validaciones implementadas, los modelos de lenguaje continúan siendo sistemas probabilísticos, por lo que no es posible garantizar precisión absoluta en todos los escenarios.
+
+Mensajes altamente ambiguos, contradictorios o redactados con errores extremos podrían producir interpretaciones incorrectas de disponibilidad horaria.
+
+Asimismo, aunque el sistema incorpora restricciones de dominio y validaciones estructurales, los modelos LLM pueden ocasionalmente generar respuestas inesperadas o inconsistentes frente a entradas fuera de distribución respecto a las utilizadas durante las pruebas.
+
+Por esta razón, la arquitectura del sistema considera al modelo únicamente como un extractor semántico asistido, manteniendo toda la lógica de decisión y cálculo final en componentes deterministas implementados en backend.
+
+\paragraph{Limitaciones de modelos pequeños locales:}
+
+Si bien el sistema soporta ejecución local mediante modelos open-source, modelos compactos como Qwen3-4B presentan limitaciones respecto a modelos cloud de mayor tamaño.
+
+Entre las principales limitaciones se encuentran:
+
+\begin{itemize}
+    \item Mayor tiempo de inferencia.
+    \item Menor precisión semántica.
+    \item Mayor sensibilidad a prompts ambiguos.
+    \item Capacidad limitada de razonamiento contextual.
+\end{itemize}
+
+Por esta razón, el modo local se considera principalmente una alternativa de respaldo o desarrollo.
+
+\paragraph{Persistencia simplificada:}
+
+Para reducir complejidad durante el desarrollo del MVP, el sistema utiliza persistencia basada en archivos JSON en lugar de una arquitectura completa con base de datos relacional distribuida.
+
+Si bien esta aproximación simplifica el desarrollo inicial, presenta limitaciones en:
+
+\begin{itemize}
+    \item Escalabilidad concurrente.
+    \item Tolerancia a fallos.
+    \item Rendimiento bajo alta carga.
+    \item Replicación y consistencia distribuida.
+\end{itemize}
+
+En una etapa futura, esta capa podría migrarse hacia PostgreSQL u otra solución orientada a producción.
+
+\subsubsection{Conclusiones de riesgos y limitaciones}
+
+El análisis realizado permite concluir que los principales riesgos del proyecto se encuentran asociados a dependencia de proveedores externos, precisión del procesamiento semántico y escalabilidad operacional.
+
+No obstante, la arquitectura modular propuesta reduce significativamente el impacto potencial de estos riesgos mediante desacoplamiento de componentes, soporte multi-proveedor y mecanismos fallback.
+
+Asimismo, las limitaciones identificadas son coherentes con el alcance de un MVP académico y no impiden demostrar la viabilidad técnica y económica del sistema.
+
+En términos generales, los riesgos identificados se consideran manejables para el alcance definido del proyecto y no impiden demostrar la viabilidad técnica y económica de Coord-Agent como MVP funcional.
