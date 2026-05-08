@@ -178,8 +178,7 @@ export function App() {
           <div className="brand-row">
             <LogoMark />
             <div>
-              <p className="eyebrow">Python + TypeScript + Gemini</p>
-              <strong>Coordina AI</strong>
+              <strong>Coord-Agent</strong>
             </div>
           </div>
           <h1>Coordinador inteligente de reuniones</h1>
