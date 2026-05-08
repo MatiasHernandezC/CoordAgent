@@ -2,11 +2,242 @@
 
 \subsection{Análisis técnico}
 
-e
+El desarrollo de Coord-Agent requiere evaluar la viabilidad de sus funcionalidades principales: interpretación de lenguaje natural, extracción de disponibilidad y cálculo de horarios. Para ello se analizan las herramientas de desarrollo, los modelos de lenguaje, las APIs externas y los recursos computacionales necesarios.
+
+En cuanto al stack tecnológico, el frontend se implementa en React 18 con TypeScript y Vite, lo que permite construir una SPA con actualización en tiempo real. El backend utiliza FastAPI con Uvicorn como servidor ASGI, siguiendo el patrón BFF (Backend for Frontend), que establece que el frontend nunca debe comunicarse directamente con el proveedor LLM. La validación de datos se realiza con Pydantic v2, asegurando consistencia estructural entre todos los módulos. Para el control de versiones se emplea GitHub.
+
+Respecto al modelo de lenguaje, el sistema soporta múltiples proveedores configurables mediante variables de entorno, lo que otorga flexibilidad para desarrollo, pruebas y demostración. Como proveedor principal se utiliza Gemini 3.0 Flash de Google, accedido mediante API REST con autenticación por clave almacenada en el archivo \texttt{.env} del backend y temperatura 0,1, dado que la tarea requiere extracción precisa, no creatividad. La salida se fuerza en formato JSON mediante \texttt{responseMimeType}. Como alternativa local se utiliza Qwen3-4B-Instruct en formato GGUF (Q4\_K\_M) ejecutado mediante \texttt{llama.cpp}. Además, el sistema cuenta con integración opcional mediante Ollama y un modo mock basado en reglas para desarrollo rápido. Ante fallos del proveedor configurado, el backend conmuta automáticamente a un extractor por reglas, garantizando continuidad operativa.
+
+La arquitectura del MVP separa estrictamente cinco módulos: el frontend en React, el BFF en FastAPI que expone endpoints REST para sesiones, mensajes, cálculo y confirmación, el LLM Service encargado exclusivamente de convertir lenguaje natural en JSON estructurado, sin tomar decisiones, el Decision Engine motor Python determinista que cruza horarios y calcula las tres mejores opciones y el JSON Repository para persistencia simple en archivo. Esta separación garantiza que el LLM nunca decide y que, ante cualquier fallo del modelo, el usuario puede corregir datos manualmente y el motor opera igual.
+
+En cuanto a recursos computacionales, al delegar la inferencia a la API de Gemini, los requisitos son mínimos: una laptop con 8 a 16 GB de RAM sin GPU basta para el desarrollo. Para producción se proyecta una VM cloud básica AWS t3.small o GCP e2 medium. En caso de optar por el modelo local Qwen 3-4B GGUF, este requiere aproximadamente 3 a 4 GB de RAM y presenta tiempos de inferencia de 10 a 30 segundos por solicitud en CPU.
+
+Finalmente, en seguridad y privacidad se aplica minimización de datos solo se persiste información estructurada, no conversaciones completas, la clave de API nunca se expone al frontend, se implementa cifrado HTTPS en producción y se validan todas las salidas del LLM contra esquemas Pydantic. El prompt del sistema restringe el dominio a coordinación de actividades, filtrando solicitudes fuera de contexto. El análisis concluye que Coord-Agent es técnicamente factible dentro del semestre, con un stack accesible y una arquitectura modular que permite escalar sin rediseñar el núcleo.
+
+
+
 
 \subsection{Análisis económico}
 
-f
+\subsubsection{Supuestos y alcance}
+
+Para efectos de la evaluación económica se considera el desarrollo de un prototipo funcional orientado a pequeñas y medianas empresas que requieren coordinar reuniones y disponibilidades de equipos de trabajo mediante procesamiento de lenguaje natural.
+
+El proyecto contempla una arquitectura cliente-servidor con backend en FastAPI, frontend web responsivo y utilización de modelos de lenguaje (LLM) externos para la extracción semántica de disponibilidad horaria desde mensajes escritos en lenguaje natural.
+
+Dado que el desarrollo será realizado en contexto académico, se considera una valorización referencial de horas de trabajo equivalente a una beca de trabajo en la Universidad de Santiago de Chile. Esta valorización permite estimar el costo real de ingeniería requerido para construir el sistema.
+
+\subsubsection{Costos de desarrollo}
+
+Para estimar el costo de implementación se considera un equipo de cuatro desarrolladores trabajando 15 horas semanales durante un periodo de 12 semanas.
+
+Se utiliza un valor promedio de \$5.000 CLP por hora trabajada, cifra representativa de labores técnicas realizadas bajo modalidad de ayudantía o beca de trabajo universitaria.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|c|}
+\hline
+Concepto & Valor \\ \hline
+Cantidad de desarrolladores & 4 \\ \hline
+Horas semanales por desarrollador & 15 \\ \hline
+Duración del proyecto & 12 semanas \\ \hline
+Valor hora estimado & \$5.000 CLP \\ \hline
+Horas totales & 720 horas \\ \hline
+Costo total de desarrollo & \$3.600.000 CLP \\ \hline
+\end{tabular}
+\caption{Estimación de costos de desarrollo}
+\end{table}
+
+El costo anterior representa principalmente el esfuerzo de ingeniería asociado al diseño de arquitectura, desarrollo backend y frontend, integración con modelos LLM, pruebas funcionales, validaciones y despliegue inicial del sistema.
+
+\subsubsection{Costos operacionales}
+
+Los costos operacionales del sistema corresponden principalmente a:
+
+\begin{itemize}
+    \item Infraestructura cloud para ejecución del backend.
+    \item Consumo de API de modelos de lenguaje.
+    \item Almacenamiento persistente y respaldos.
+    \item Dominio y servicios auxiliares.
+    \item Mantención y soporte técnico básico.
+\end{itemize}
+
+Debido a que el sistema no requiere procesamiento intensivo fuera de las consultas al modelo LLM, el principal costo variable corresponde al consumo de tokens utilizados en cada interacción procesada.
+
+\subsubsection{Costo asociado al uso de modelos LLM}
+
+Durante las pruebas realizadas utilizando el modelo Gemini 2.5 Flash se observó un consumo promedio cercano a 1.300 tokens por consulta completa, considerando tanto tokens de entrada como de salida.
+
+En promedio, cada consulta generó un costo cercano a \$0.00025 USD, considerando:
+
+\begin{itemize}
+    \item Aproximadamente 1.000 tokens de entrada.
+    \item Aproximadamente 300 tokens de salida.
+    \item Tarifas oficiales publicadas para Gemini 2.5 Flash.
+\end{itemize}
+
+Sin embargo, para efectos conservadores de evaluación financiera se utilizará una cota superior equivalente a 1.000 consultas por aproximadamente \$0.30 USD.
+
+Esta aproximación permite modelar escenarios de utilización intensiva manteniendo márgenes de seguridad adecuados para la estimación de costos operacionales.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|c|}
+\hline
+Concepto & Valor \\ \hline
+Costo estimado cada 1.000 consultas & \$0.30 USD \\ \hline
+Costo estimado por consulta & \$0.0003 USD \\ \hline
+Consultas mensuales estimadas por empresa & 10.000 \\ \hline
+Costo mensual LLM por empresa & \$3 USD aprox. \\ \hline
+\end{tabular}
+\caption{Estimación de costos asociados al consumo LLM}
+\end{table}
+
+Los resultados muestran que el costo variable asociado al uso de modelos de lenguaje resulta extremadamente bajo en comparación al valor funcional entregado por el sistema.
+
+\subsubsection{Costo total estimado}
+
+Considerando infraestructura cloud básica, almacenamiento, dominio, servicios backend y consumo de modelos LLM, se estima un costo operacional mensual cercano al presentado en la Tabla \ref{tab:costos_operacionales}.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|p{8cm}|c|}
+\hline
+Concepto & Costo mensual estimado \\ \hline
+
+Servidor backend VPS (Amazon Lightsail, Linux, 2 GB RAM, 2 vCPU, 60 GB SSD) \parencite{aws_lightsail_pricing} & \$12 USD \\ \hline
+
+Base de datos y almacenamiento persistente (respaldos y crecimiento de sesiones) & \$5 USD \\ \hline
+
+Consumo API LLM (Gemini 2.5 Flash, 10.000 consultas mensuales) & \$3 USD \\ \hline
+
+Dominio, HTTPS y servicios auxiliares (DNS, SSL y monitoreo básico) & \$5 USD \\ \hline
+
+Mantención técnica y soporte básico & \$120.000 CLP \\ \hline
+
+\textbf{Total mensual estimado} & \textbf{\$145.000 CLP aprox.} \\ \hline
+
+\end{tabular}
+\caption{Estimación de costos operacionales mensuales}
+\label{tab:costos_operacionales}
+\end{table}
+
+El costo asociado al servidor backend fue estimado utilizando los precios publicados por Amazon Lightsail para instancias Linux de pequeña escala, suficientes para soportar el backend FastAPI, frontend web y base de datos del sistema.
+
+Para el consumo de modelos de lenguaje se utilizó una aproximación conservadora basada en pruebas realizadas con Gemini 2.5 Flash, considerando aproximadamente 10.000 consultas mensuales y una cota superior cercana a \$0.30 USD por cada 1.000 consultas.
+
+Los costos asociados a dominio y servicios auxiliares consideran la utilización de un dominio comercial, certificados HTTPS y herramientas mínimas necesarias para despliegue y operación continua del sistema.
+
+Finalmente, se incorpora un costo asociado a mantención técnica básica, contemplando tareas de monitoreo, actualización de dependencias, resolución de incidentes menores y soporte operacional del sistema.
+
+\subsubsection{Estrategia de monetización}
+
+El modelo de negocio propuesto considera la comercialización del sistema bajo modalidad SaaS (Software as a Service), cobrando una suscripción mensual a empresas interesadas en automatizar la coordinación de reuniones y disponibilidad de equipos.
+
+Debido al bajo costo operacional por cliente, el sistema presenta márgenes operacionales elevados incluso utilizando tarifas relativamente accesibles para pequeñas y medianas empresas.
+
+Se propone un valor de suscripción entre \$25.000 y \$50.000 CLP mensuales por empresa, dependiendo de:
+
+\begin{itemize}
+    \item Cantidad de usuarios registrados.
+    \item Integraciones disponibles.
+    \item Límite de consultas mensuales.
+    \item Funcionalidades premium.
+    \item Nivel de soporte ofrecido.
+\end{itemize}
+
+\subsubsection{Análisis de recuperación de inversión}
+
+Considerando un costo total de desarrollo estimado en \$3.600.000 CLP y costos operacionales mensuales cercanos a \$145.000 CLP, se obtiene el siguiente escenario económico.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|c|}
+\hline
+Concepto & Valor \\ \hline
+Costo total de desarrollo & \$3.600.000 CLP \\ \hline
+Costo operacional mensual & \$145.000 CLP \\ \hline
+Precio mensual promedio por empresa & \$35.000 CLP \\ \hline
+Margen operacional estimado & 70\% -- 85\% \\ \hline
+Empresas necesarias para cubrir operación mensual & 5 empresas aprox. \\ \hline
+Empresas-mes para recuperar inversión inicial & 103 empresas-mes aprox. \\ \hline
+\end{tabular}
+\caption{Estimación de recuperación de inversión}
+\end{table}
+
+Lo anterior implica que:
+
+\begin{itemize}
+    \item Con 10 empresas activas, la inversión podría recuperarse en aproximadamente 10 a 12 meses.
+    \item Con 25 empresas activas, el periodo de recuperación disminuiría a aproximadamente 4 a 5 meses.
+    \item Una vez cubiertos los costos operacionales base, cada nuevo cliente genera un costo marginal relativamente bajo.
+    \item El sistema presenta alta escalabilidad debido a la baja variación de costos frente al aumento de usuarios concurrentes.
+\end{itemize}
+
+\subsubsection{Escalabilidad económica del sistema}
+
+Uno de los principales atributos económicos del sistema es su bajo costo marginal por cliente adicional. La mayor parte de los costos operacionales corresponden a infraestructura base y mantención, mientras que el consumo asociado al procesamiento mediante modelos LLM representa un costo relativamente reducido incluso bajo escenarios de uso intensivo.
+
+Debido a que la arquitectura propuesta utiliza servicios cloud escalables y procesamiento externo mediante APIs, el sistema puede aumentar progresivamente su capacidad sin requerir rediseños importantes de infraestructura.
+
+En escenarios de crecimiento, el incremento de costos operacionales se concentra principalmente en:
+
+\begin{itemize}
+    \item Mayor capacidad de cómputo del servidor backend.
+    \item Incremento del consumo mensual de tokens LLM.
+    \item Mayor almacenamiento persistente.
+    \item Aumento de requerimientos de soporte y monitoreo.
+\end{itemize}
+
+Sin embargo, el crecimiento de estos costos no es lineal respecto al número de clientes, permitiendo mantener márgenes operacionales elevados incluso con una base moderada de empresas activas.
+
+Por ejemplo, duplicar la cantidad de empresas no implica necesariamente duplicar el costo de infraestructura, ya que una misma instancia cloud puede soportar múltiples organizaciones simultáneamente durante las primeras etapas del proyecto.
+
+Esto permite proyectar un modelo SaaS escalable y económicamente sustentable en el tiempo.
+
+\subsubsection{Modelo de negocio simplificado}
+
+El proyecto propone un modelo de negocio tipo SaaS (Software as a Service), orientado principalmente a pequeñas y medianas empresas que requieran optimizar la coordinación de reuniones, equipos y disponibilidad horaria mediante procesamiento de lenguaje natural.
+
+La propuesta de valor principal consiste en reducir el tiempo invertido en coordinación manual, minimizar errores de comunicación y automatizar la consolidación de horarios disponibles entre múltiples participantes.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|p{5cm}|p{8cm}|}
+\hline
+Elemento & Descripción \\ \hline
+
+Segmento de clientes &
+Pequeñas y medianas empresas, equipos de trabajo, organizaciones y grupos que requieran coordinación frecuente de reuniones. \\ \hline
+
+Propuesta de valor &
+Automatización de coordinación grupal mediante IA, reducción de tiempo administrativo y simplificación de toma de decisiones. \\ \hline
+
+Canal de distribución &
+Aplicación web SaaS accesible desde navegador. \\ \hline
+
+Fuente de ingresos &
+Suscripción mensual por empresa. \\ \hline
+
+Estructura de costos &
+Infraestructura cloud, consumo de APIs LLM, almacenamiento y soporte técnico. \\ \hline
+
+Ventaja competitiva &
+Uso de lenguaje natural, arquitectura modular y bajo costo operacional. \\ \hline
+
+\end{tabular}
+\caption{Modelo de negocio simplificado del sistema}
+\end{table}
+
+\subsubsection{Conclusiones económicas}
+
+El análisis económico realizado evidencia que el sistema posee una estructura de costos favorable para un modelo SaaS basado en inteligencia artificial.
+
+Los costos asociados al consumo de modelos LLM resultan significativamente bajos en comparación al valor agregado entregado por la automatización de coordinación grupal y extracción semántica de disponibilidad.
+
+Adicionalmente, el sistema presenta características de alta escalabilidad, ya que el costo marginal por cliente adicional es reducido. Esto permite proyectar escenarios de rentabilidad positivos incluso con una base moderada de clientes.
+
+En consecuencia, desde un punto de vista económico, el proyecto resulta técnicamente viable y potencialmente sustentable en un contexto de comercialización real.
 
 \subsection{Evaluación de riesgos y limitaciones}
 
