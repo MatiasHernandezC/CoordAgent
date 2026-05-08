@@ -1,10 +1,10 @@
 \section{Definición del proyecto}
 
-Tal como se adelantaba, en este proyecto se busca la creación de un agenete conversacional capaz de transformear conversaciones desestructuradas en decisiones grupales concretas, optimizando la coordinación de equipos mediante un análisis de disponibilidad, preferencias y restricciones.
+Tal como se adelantaba, en este proyecto se busca la creación de un agente conversacional basado en LLM capaz de transformar conversaciones desestructuradas en decisiones grupales concretas, optimizando la coordinación de equipos mediante un análisis de disponibilidad, preferencias y restricciones.
 
 \subsection{Identificación del problema u oportunidad}
 
-En entornos organizacionales, la coordinación de actividades grupales (como reuniones, planificación de tareas o eventos de equipo) se realiza comúnmente a través de herramientas de comunicación generalistas como WhatsApp, correo electrónico o plataformas de mensajería colaborativa. Sin embargo, estas herramientas no están diseñadas para gestionar procesos de coordinación de manera estructurada. 
+En entornos organizacionales, la coordinación de actividades grupales (como reuniones, planificación de tareas o eventos de equipo) se realiza comúnmente a través de herramientas de comunicación generalistas como WhatsApp, correo electrónico o plataformas de mensajería colaborativa como Slack. Sin embargo, estas herramientas no están diseñadas para gestionar procesos de coordinación de manera estructurada. 
 
 
 Lo anterior genera múltiples ineficiencias operativas:
@@ -28,52 +28,39 @@ Esto representa una oportunidad para desarrollar un sistema que permita estructu
 
 \subsection{Justificación del propósito}
 
-El proyecto tiene un propósito principalmente comercial, orientado a mejorar la eficiencia operativa en equipos de trabajo y organizaciones.
+El proyecto tiene un propósito principalmente comercial, orientado a mejorar la eficiencia operativa en la coordinación equipos de trabajo y organizaciones.
 
 \subsubsection{Propuesta de valor}
 
 La propuesta de valor se centra en:
 
 \begin{enumerate}
+    \item \textbf{Reducción de fricción:} Disminuye la fricción en la comunicación interna.
+    
     \item \textbf{Automatización:} Automatizar la toma de decisiones grupales en base a disponibilidad y restricciones
     
     \item \textbf{Ahorro de tiempo:} Reducir el tiempo destinado a la coordinación de reuniones y actividades.
-    
-    \item \textbf{Reducción de fricción:} Disminuye la fricción en la comunicación interna.
     
     \item \textbf{Accesibilidad:} Al ser usado en lenguaje natural no requiere una capacitación técnica por parte de los usuarios.
 \end{enumerate}
 
 El sistema permite capturar información incompleta o distribuida y consolidarla en resultados concretos, generando ahorros de tiempo y mejoras en productividad.
 
-\subsubsection{Modelo de ingresos propuesto}
-
-\begin{enumerate}
-    \item Software as a service (SaaS) para equipos y organizaciones.
-    \item Suscripción mensual por usuario o por equipo.
-    \item Integración con herramientas corporativas
-    \item Funcionalidades premium como:
-    \begin{itemize}
-        \item Optimización automática de horarios.
-        \item Análisis de eficicencia en reuniones.
-        \item Gestión avanzada de equipos y disponibilidad.
-    \end{itemize}
-\end{enumerate}
 
 \subsection{Planteamiento de los objetivos del proyecto}
 
 \subsubsection{Objetivo General}
 
-Desarrollar un agente basado en LLM capaz de recibir entradas en lenguaje natural, analizarlas y tansformarlas en decisiones concretas, esto a través del ofrecimiento de opciones según disponibilidad, preferencias y restricciones temporales de los usuarios, con el fin de facilitar la coordinación de actividades grupales.
+Desarrollar un agente basado en LLM capaz de recibir entradas en lenguaje natural, analizarlas y tansformarlas en decisiones concretas, esto a través del ofrecimiento de opciones según disponibilidad, preferencias y restricciones temporales de los usuarios con el fin de facilitar la coordinación de actividades grupales.
 
 \subsubsection{Objetivos específicos}
 
 \begin{enumerate}
-    \item Para el 8 de mayo, diseñar y documentar la arquitectura del sistema, incluyendo el componente de persistencia (archivos JSON), la integración con el LLM, los diagramas UML (casos de uso, secuencia, componentes) y la especificación de endpoints de la API, validando que cubra los requisitos de utilidad para el usuario a través de una minidemo funcional.
+    \item Para el 8 de mayo, diseñar y documentar la arquitectura del sistema, incluyendo el componente de persistencia (archivos JSON inicialmente), la integración con el LLM, los diagramas UML y la especificación de endpoints de la API, validando que cubra los requerimientos funcionales a través de una minidemo.
     
-    \item Antes del 22 de mayo, implementar un MVP parcial ejecutable en entorno local, que permita el flujo completo de conversación → extracción de disponibilidad → revisión manual → cálculo de horarios sugeridos → confirmación, con un manejo básico de errores y conexión funcional entre frontend y backend.
+    \item Antes del 22 de mayo, implementar un MVP parcial ejecutable en entorno local, que permita el flujo completo de conversación → extracción de disponibilidad → cálculo de horarios sugeridos → confirmación, con un manejo básico de errores y conexión funcional entre frontend, backend y la base de datos.
     
     \item Hasta el 7 de julio, diseñar e implementar mecanismos de guardrails (filtros de entrada, restricción temática, validación de salida) que limiten el comportamiento del LLM al dominio de coordinación, logrando reducir las alucinaciones y rechazar prompts maliciosos en al menos el 90\% de los casos de prueba documentados.
     
-    \item Desde el 23 de mayo al 23 de junio, evaluar el sistema en un entorno real mediante al menos 3 casos de uso con usuarios simulados, midiendo la precisión de la decisión propuesta (objetivo $\ge 85\%$) y la satisfacción percibida (encuesta con escala 1-5, objetivo $\ge 4$), entregando un informe de resultados para la evaluación final.
+    \item Desde el 23 de mayo al 23 de junio, evaluar el sistema en un entorno real en la nube mediante al menos 3 casos de uso con usuarios simulados, midiendo la precisión de la decisión propuesta (objetivo $\ge 85\%$) y la satisfacción percibida (encuesta con escala 1-5, objetivo $\ge 4$), entregando un informe de resultados para la evaluación final.
 \end{enumerate}
