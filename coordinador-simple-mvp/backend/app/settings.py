@@ -7,7 +7,16 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 
 load_dotenv(dotenv_path=env_path, override=True)
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+
+def find_workspace_root(settings_file: Path) -> Path:
+    for parent in settings_file.parents:
+        if (parent / "local_llm.py").exists() and (parent / "models").exists():
+            return parent
+
+    return settings_file.parents[4]
+
+
+WORKSPACE_ROOT = find_workspace_root(Path(__file__).resolve())
 
 
 def env_int(name: str, default: int) -> int:
@@ -18,6 +27,23 @@ def env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class Settings:
@@ -34,27 +60,37 @@ class Settings:
     local_llm_model: str = os.getenv("LOCAL_LLM_MODEL", "qwen")
     local_llm_timeout_seconds: int = env_int("LOCAL_LLM_TIMEOUT_SECONDS", 180)
     local_llm_max_tokens: int = env_int("LOCAL_LLM_MAX_TOKENS", 700)
-    llm_cache_enabled: bool = os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true"
+    llm_cache_enabled: bool = env_bool("LLM_CACHE_ENABLED", True)
     llm_cache_max_items: int = env_int("LLM_CACHE_MAX_ITEMS", 64)
+    llm_fallback_enabled: bool = env_bool("LLM_FALLBACK_ENABLED", True)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
     gemini_url: str = os.getenv(
         "GEMINI_URL",
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
     )
     gemini_timeout_seconds: int = env_int("GEMINI_TIMEOUT_SECONDS", 45)
+    gemini_cooldown_seconds: int = env_int("GEMINI_COOLDOWN_SECONDS", 60)
     
-    gemini_input_price_per_million: float = float(
-        os.getenv("GEMINI_INPUT_PRICE_PER_MILLION", "0.10")
-    )
+    gemini_input_price_per_million: float = env_float("GEMINI_INPUT_PRICE_PER_MILLION", 0.10)
+    gemini_output_price_per_million: float = env_float("GEMINI_OUTPUT_PRICE_PER_MILLION", 0.40)
 
-    gemini_output_price_per_million: float = float(
-        os.getenv("GEMINI_OUTPUT_PRICE_PER_MILLION", "0.40")
-    )
     @property
     def cors_origins(self) -> list[str]:
         raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def runtime_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.llm_provider == "gemini":
+            if not self.gemini_api_key:
+                warnings.append("Gemini esta seleccionado, pero falta GEMINI_API_KEY.")
+            if self.gemini_model == "gemini-3.0-flash":
+                warnings.append("gemini-3.0-flash no esta disponible en v1beta/generateContent; usa gemini-2.5-flash-lite.")
+            if not self.llm_fallback_enabled:
+                warnings.append("Fallback desactivado: si Gemini falla, la app mostrara error en vez de usar mock.")
+        return warnings
 
 
 settings = Settings()

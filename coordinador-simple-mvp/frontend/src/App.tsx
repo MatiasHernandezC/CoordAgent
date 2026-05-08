@@ -12,7 +12,7 @@ import {
   sendChannelMessage,
   sendMessage
 } from "./api";
-import type { AvailabilityCell, Day, RuntimeInfo, Session } from "./types";
+import type { AvailabilityCell, Day, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const EXAMPLE =
   "Yo puedo lunes en la tarde, Camila puede lunes desde las 16 y Diego puede martes en la manana, Pedro puede a cualquier hora todos los dias";
@@ -42,11 +42,13 @@ export function App() {
   const [listeningEnabled, setListeningEnabled] = useState(true);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [lastElapsedMs, setLastElapsedMs] = useState<number | null>(null);
+  const [lastTokenUsage, setLastTokenUsage] = useState<TokenUsage | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState("");
   const [error, setError] = useState("");
 
   const bestOption = session?.options[0] ?? null;
+  const tokenTotals = useMemo(() => calculateTokenTotals(session), [session]);
   const totalSlots = useMemo(
     () => session?.participants.reduce((sum, participant) => sum + participant.availability.length, 0) ?? 0,
     [session]
@@ -78,6 +80,7 @@ export function App() {
       const response = await createSession(title);
       setSession(response.session);
       setLlmSource("");
+      setLastTokenUsage(null);
       setTriggerWord(response.session.channel_config.trigger_word);
       setListeningEnabled(response.session.channel_config.listening_enabled);
     });
@@ -92,6 +95,7 @@ export function App() {
       setSession(response.session);
       setLlmSource(response.llm_source);
       setLastElapsedMs(response.elapsed_ms);
+      setLastTokenUsage(response.token_usage);
     });
   }
 
@@ -150,6 +154,7 @@ export function App() {
       setSession(response.session);
       setLlmSource(response.llm_source ?? llmSource);
       setLastElapsedMs(response.elapsed_ms);
+      setLastTokenUsage(response.token_usage);
       setChannelText("");
     });
   }
@@ -162,26 +167,48 @@ export function App() {
       setSession(response.session);
       setLlmSource(response.llm_source ?? llmSource);
       setLastElapsedMs(response.elapsed_ms);
+      setLastTokenUsage(response.token_usage);
     });
   }
 
   return (
     <main className="page-shell">
       <section className="app-header">
-        <div>
-          <p className="eyebrow">Python + TypeScript + LLM minimo</p>
+        <div className="brand-block">
+          <div className="brand-row">
+            <LogoMark />
+            <div>
+              <p className="eyebrow">Python + TypeScript + Gemini</p>
+              <strong>Coordina AI</strong>
+            </div>
+          </div>
           <h1>Coordinador inteligente de reuniones</h1>
           <p className="subtitle">
             Escribe disponibilidad en lenguaje natural, revisa lo que el sistema entendio y confirma una opcion explicada.
           </p>
+          <div className="hero-tags">
+            <span>Canal simulado</span>
+            <span>Extraccion LLM</span>
+            <span>Decision Python</span>
+          </div>
         </div>
         <div className="status-card">
           <span>Estado</span>
           <strong>{formatStatus(session?.status)}</strong>
           <small>{runtime ? `LLM activo: ${runtime.provider_label}` : "LLM activo: revisando..."}</small>
           {lastElapsedMs !== null ? <small>Ultima llamada: {formatElapsed(lastElapsedMs)}</small> : null}
+          {lastTokenUsage ? <small>{formatTokenUsage(lastTokenUsage)}</small> : null}
+          {tokenTotals.totalTokens > 0 ? <small>Total sesion: {formatTokenTotals(tokenTotals)}</small> : null}
         </div>
       </section>
+
+      {runtime?.warnings.length ? (
+        <div className="warning-banner">
+          {runtime.warnings.map((warning) => (
+            <p key={warning}>{warning}</p>
+          ))}
+        </div>
+      ) : null}
 
       {error ? <div className="error-banner">{error}</div> : null}
       {loading ? <div className="activity-banner">{loadingLabel || "Procesando..."}</div> : null}
@@ -191,6 +218,7 @@ export function App() {
         <Metric title="Disponibilidades" value={totalSlots} detail="bloques declarados" />
         <Metric title="Faltantes" value={session?.missing_info.length ?? 0} detail="datos por completar" />
         <Metric title="Mejor cobertura" value={bestOption ? `${bestOption.coverage_percent}%` : "-"} detail="opcion principal" />
+        <Metric title="Costo Gemini" value={tokenTotals.totalTokens ? `$${tokenTotals.estimatedCostUsd.toFixed(6)}` : "-"} detail={`${tokenTotals.totalTokens} tokens reales`} />
       </section>
 
       <section className="surface channel-section">
@@ -334,6 +362,7 @@ export function App() {
               <span className="source-pill">
                 LLM: {llmSource}
                 {lastElapsedMs !== null ? ` - ${formatElapsed(lastElapsedMs)}` : ""}
+                {lastTokenUsage ? ` - ${formatTokenUsage(lastTokenUsage)}` : ""}
               </span>
             ) : null}
           </div>
@@ -400,6 +429,7 @@ export function App() {
                   <span className="timeline-meta">{item.role}{item.source ? ` - ${item.source}` : ""}</span>
                   <span>{item.role}{item.source ? ` · ${item.source}` : ""}</span>
                   <p>{item.content}</p>
+                  {item.token_usage ? <small>{formatTokenUsage(item.token_usage)}</small> : null}
                 </div>
               ))}
             </div>
@@ -466,6 +496,16 @@ export function App() {
         {session?.decision_summary ? <div className="summary-box">{session.decision_summary}</div> : null}
       </section>
     </main>
+  );
+}
+
+function LogoMark() {
+  return (
+    <div className="logo-mark" aria-hidden="true">
+      <span className="logo-node node-a" />
+      <span className="logo-node node-b" />
+      <span className="logo-node node-c" />
+    </div>
   );
 }
 
@@ -628,6 +668,40 @@ function formatStatus(status: Session["status"] | undefined) {
 function formatElapsed(ms: number) {
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function formatTokenUsage(usage: TokenUsage) {
+  if (usage.cached) return "cache: 0 tokens";
+  return `${usage.total_tokens} tokens, costo aprox. $${usage.estimated_cost_usd.toFixed(6)}`;
+}
+
+function formatTokenTotals(totals: TokenTotals) {
+  return `${totals.totalTokens} tokens, $${totals.estimatedCostUsd.toFixed(6)}`;
+}
+
+type TokenTotals = {
+  totalTokens: number;
+  estimatedCostUsd: number;
+};
+
+function calculateTokenTotals(session: Session | null): TokenTotals {
+  if (!session) {
+    return { totalTokens: 0, estimatedCostUsd: 0 };
+  }
+
+  return session.messages.reduce<TokenTotals>(
+    (totals, message) => {
+      if (!message.token_usage || message.token_usage.cached) {
+        return totals;
+      }
+
+      return {
+        totalTokens: totals.totalTokens + message.token_usage.total_tokens,
+        estimatedCostUsd: totals.estimatedCostUsd + message.token_usage.estimated_cost_usd
+      };
+    },
+    { totalTokens: 0, estimatedCostUsd: 0 }
+  );
 }
 
 function getHeatLevel(percent: number) {

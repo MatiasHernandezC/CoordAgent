@@ -110,10 +110,24 @@ Para usar Gemini API, crea o edita `backend/.env` y usa:
 ```txt
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=tu_api_key
-GEMINI_MODEL=gemini-2.0-flash
+GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_COOLDOWN_SECONDS=60
 ```
 
 El backend llama a `generateContent`, solicita salida `application/json` y valida el resultado con el mismo esquema usado por Qwen/Ollama. Si falta la key o la API falla, vuelve al extractor `mock_fallback` para que la demo no quede inutilizable.
+
+Para no consumir cuota de Gemini durante pruebas repetidas, usa `LLM_PROVIDER=mock` o `LLM_PROVIDER=local`. Si la API responde `429`, el backend entra en cooldown y deja de insistir por unos segundos.
+
+Cuando Gemini responde bien, la app muestra tokens y costo aproximado de la ultima llamada y el total acumulado de la sesion. Las llamadas servidas desde cache cuentan como `0 tokens`.
+
+Para obligar a usar Gemini real durante una prueba:
+
+```txt
+LLM_PROVIDER=gemini
+GEMINI_MODEL=gemini-2.5-flash-lite
+LLM_FALLBACK_ENABLED=false
+LLM_CACHE_ENABLED=false
+```
 
 Para usar Ollama local:
 
@@ -137,7 +151,7 @@ Mas detalle: `docs/CONFIGURACION_LLM.md`.
 
 - `Cargar conversacion ejemplo` usa un endpoint batch para enviar todos los mensajes en una sola llamada.
 - Las respuestas LLM repetidas se cachean en memoria si `LLM_CACHE_ENABLED=true`.
-- Si el provider configurado falla, el backend vuelve a `mock_fallback` para no romper la demo.
+- Si `LLM_FALLBACK_ENABLED=true` y el provider configurado falla, el backend vuelve a `mock_fallback` para no romper la demo.
 - Si no existe `backend/.env`, no estas seleccionando explicitamente nube/local/mock; se usaran los defaults de `settings.py`.
 
 ## Valor visible del MVP

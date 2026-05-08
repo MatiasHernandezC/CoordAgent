@@ -13,6 +13,7 @@ class TokenUsage(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    cached: bool = False
 
 class TimeSlot(BaseModel):
     day: Day
@@ -24,6 +25,11 @@ class Participant(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
     availability: list[TimeSlot] = Field(default_factory=list)
+
+
+class AvailabilityRemoval(BaseModel):
+    participant_name: str
+    slots: list[TimeSlot] = Field(default_factory=list)
 
 
 class TimeOption(BaseModel):
@@ -53,6 +59,7 @@ class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
     source: str | None = None
+    token_usage: TokenUsage | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -108,6 +115,7 @@ class ConfirmRequest(BaseModel):
 
 class ExtractedAvailability(BaseModel):
     participants: list[Participant] = Field(default_factory=list)
+    removals: list[AvailabilityRemoval] = Field(default_factory=list)
 
 
 class AddParticipantRequest(BaseModel):
@@ -149,4 +157,6 @@ class RuntimeInfo(BaseModel):
     provider_label: str
     model: str
     cache_enabled: bool
+    fallback_enabled: bool
     gemini_configured: bool
+    warnings: list[str] = Field(default_factory=list)

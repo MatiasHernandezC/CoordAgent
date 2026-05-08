@@ -34,11 +34,21 @@ export type AvailabilityCell = {
   coverage_percent: number;
 };
 
+export type TokenUsage = {
+  provider: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  cached: boolean;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   source: string | null;
+  token_usage: TokenUsage | null;
   created_at: string;
 };
 
@@ -78,5 +88,7 @@ export type RuntimeInfo = {
   provider_label: string;
   model: string;
   cache_enabled: boolean;
+  fallback_enabled: boolean;
   gemini_configured: boolean;
+  warnings: string[];
 };

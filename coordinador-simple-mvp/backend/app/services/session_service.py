@@ -1,6 +1,6 @@
 from fastapi import HTTPException
 
-from app.schemas import ChannelMessage, ChatMessage, ExtractedAvailability, Participant, Session, TimeOption, TimeSlot
+from app.schemas import ChannelMessage, ChatMessage, ExtractedAvailability, Participant, Session, TimeOption, TimeSlot, TokenUsage
 from app.services.decision_engine import build_availability_matrix, build_insights, calculate_options, find_missing_info
 from app.storage.json_repository import repository
 
@@ -30,6 +30,7 @@ class SessionService:
         extraction: ExtractedAvailability,
         original_message: str | None = None,
         source: str | None = None,
+        token_usage: TokenUsage | None = None,
     ) -> Session:
         session = self.get(session_id)
 
@@ -43,15 +44,32 @@ class SessionService:
             else:
                 session.participants.append(incoming)
 
+        removed_names: list[str] = []
+        for removal in extraction.removals:
+            if not removal.slots:
+                continue
+
+            participant = next((p for p in session.participants if p.name.lower() == removal.participant_name.lower()), None)
+            if not participant:
+                participant = Participant(name=removal.participant_name.strip())
+                session.participants.append(participant)
+
+            participant.availability = remove_slots(participant.availability, removal.slots)
+            removed_names.append(participant.name)
+
         session.missing_info = find_missing_info(session)
         session.availability_matrix = build_availability_matrix(session)
         session.insights = build_insights(session)
         extracted_names = ", ".join(participant.name for participant in extraction.participants) or "sin participantes claros"
+        removal_summary = ""
+        if removed_names:
+            removal_summary = f" Remociones aplicadas: {', '.join(sorted(set(removed_names)))}."
         session.messages.append(
             ChatMessage(
                 role="assistant",
-                content=f"Extraccion completada: {extracted_names}. Revisa y corrige si hace falta.",
+                content=f"Extraccion completada: {extracted_names}.{removal_summary} Revisa y corrige si hace falta.",
                 source=source,
+                token_usage=token_usage,
             )
         )
         session.status = "draft"
@@ -172,6 +190,18 @@ class SessionService:
         session.messages.append(ChatMessage(role="assistant", content=reply, source="channel_simulator"))
         return repository.save(session)
 
+    def pending_channel_messages(self, session: Session) -> list[ChannelMessage]:
+        last_agent_index = -1
+        for index, message in enumerate(session.channel_messages):
+            if message.kind == "agent":
+                last_agent_index = index
+
+        return [
+            message
+            for message in session.channel_messages[last_agent_index + 1 :]
+            if message.kind == "human"
+        ]
+
 
 def find_option(options: list[TimeOption], option_id: str) -> TimeOption | None:
     return next((option for option in options if option.id == option_id), None)
@@ -190,6 +220,47 @@ def merge_slots(existing: list[TimeSlot], incoming: list[TimeSlot]) -> list[Time
     for slot in incoming:
         by_key[(slot.day, slot.start, slot.end)] = slot
     return list(by_key.values())
+
+
+def remove_slots(existing: list[TimeSlot], removals: list[TimeSlot]) -> list[TimeSlot]:
+    updated = existing
+    for removal in removals:
+        next_slots: list[TimeSlot] = []
+        for slot in updated:
+            next_slots.extend(subtract_slot(slot, removal))
+        updated = next_slots
+    return merge_slots([], updated)
+
+
+def subtract_slot(slot: TimeSlot, removal: TimeSlot) -> list[TimeSlot]:
+    if slot.day != removal.day:
+        return [slot]
+
+    slot_start = time_to_minutes(slot.start)
+    slot_end = time_to_minutes(slot.end)
+    removal_start = time_to_minutes(removal.start)
+    removal_end = time_to_minutes(removal.end)
+
+    overlap_start = max(slot_start, removal_start)
+    overlap_end = min(slot_end, removal_end)
+    if overlap_start >= overlap_end:
+        return [slot]
+
+    remaining: list[TimeSlot] = []
+    if slot_start < overlap_start:
+        remaining.append(TimeSlot(day=slot.day, start=minutes_to_time(slot_start), end=minutes_to_time(overlap_start)))
+    if overlap_end < slot_end:
+        remaining.append(TimeSlot(day=slot.day, start=minutes_to_time(overlap_end), end=minutes_to_time(slot_end)))
+    return remaining
+
+
+def time_to_minutes(value: str) -> int:
+    hours, minutes = value.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def minutes_to_time(value: int) -> str:
+    return f"{value // 60:02d}:{value % 60:02d}"
 
 
 def build_summary(session: Session, option: TimeOption) -> str:

@@ -1,6 +1,6 @@
 from time import perf_counter
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.schemas import (
     AddAvailabilityRequest,
@@ -17,7 +17,7 @@ from app.schemas import (
     TimeSlot,
 )
 from app.settings import settings
-from app.services.llm_service import llm_service
+from app.services.llm_service import LlmUnavailableError, llm_service
 from app.services.session_service import build_channel_reply, session_service
 
 router = APIRouter()
@@ -37,7 +37,9 @@ def runtime_info():
         provider_label=f"{settings.llm_provider}:{model}",
         model=model,
         cache_enabled=settings.llm_cache_enabled,
+        fallback_enabled=settings.llm_fallback_enabled,
         gemini_configured=bool(settings.gemini_api_key),
+        warnings=settings.runtime_warnings,
     )
 
 
@@ -55,8 +57,12 @@ def get_session(session_id: str):
 @router.post("/sessions/{session_id}/message", response_model=MessageResponse)
 def add_message(session_id: str, payload: MessageRequest):
     started = perf_counter()
-    extraction, source, token_usage = llm_service.extract_availability(payload.message)
-    session = session_service.merge_extraction(session_id, extraction, payload.message, source)
+    try:
+        extraction, source, token_usage = llm_service.extract_availability(payload.message)
+    except LlmUnavailableError as error:
+        raise_llm_http_error(error)
+
+    session = session_service.merge_extraction(session_id, extraction, payload.message, source, token_usage)
     return MessageResponse(
         session=session,
         llm_source=source,
@@ -116,14 +122,18 @@ def invoke_channel_if_needed(
     if not invoked:
         return ChannelMessageResponse(session=session, invoked=False, elapsed_ms=elapsed_ms(started))
 
-    extraction, source, token_usage = llm_service.extract_channel_availability(
-        session.channel_messages
-    )
+    pending_messages = session_service.pending_channel_messages(session)
+    try:
+        extraction, source, token_usage = llm_service.extract_channel_availability(pending_messages)
+    except LlmUnavailableError as error:
+        raise_llm_http_error(error)
+
     session = session_service.merge_extraction(
         session_id,
         extraction,
         original_message="Invocacion desde canal simulado.",
         source=source,
+        token_usage=token_usage,
     )
     session = session_service.calculate(session_id)
     reply = build_channel_reply(session)
@@ -136,6 +146,18 @@ def invoke_channel_if_needed(
         agent_reply=reply,
         elapsed_ms=elapsed_ms(started),
         token_usage=token_usage,
+    )
+
+
+def raise_llm_http_error(error: LlmUnavailableError) -> None:
+    headers = {}
+    if error.retry_after_seconds:
+        headers["Retry-After"] = str(error.retry_after_seconds)
+
+    raise HTTPException(
+        status_code=error.status_code,
+        detail=error.message,
+        headers=headers,
     )
 
 
