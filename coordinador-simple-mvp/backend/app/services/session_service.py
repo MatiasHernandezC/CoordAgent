@@ -2,7 +2,8 @@ from fastapi import HTTPException
 
 from app.schemas import ChannelMessage, ChatMessage, ExtractedAvailability, Participant, Session, TimeOption, TimeSlot, TokenUsage
 from app.services.decision_engine import build_availability_matrix, build_insights, calculate_options, find_missing_info
-from app.storage.json_repository import repository
+#from app.storage.json_repository import repository
+from app.storage.postgres_repository import repository
 
 
 class SessionService:
