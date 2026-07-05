@@ -18,7 +18,7 @@ flowchart TD
   A["Frontend React + TypeScript"] --> B["FastAPI BFF"]
   B --> C["LLM Service"]
   B --> D["Decision Engine Python"]
-  B --> E["JSON Repository"]
+  B --> E["Repositorio (Postgres / JSON)"]
 ```
 
 ## Carpetas
@@ -49,6 +49,7 @@ cd backend
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+copy .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -57,6 +58,9 @@ Backend:
 ```txt
 http://localhost:8000
 ```
+
+> Sin `backend/.env` se usan los defaults de `settings.py` (que asumen Postgres).
+> Para correr sin base de datos, pon `DB_BACKEND=json` en el `.env` (ver siguiente seccion).
 
 ## Ejecutar Frontend
 
@@ -71,6 +75,39 @@ Frontend:
 ```txt
 http://127.0.0.1:5173
 ```
+
+## Base de datos y almacenamiento
+
+El backend persiste las sesiones a traves de un repositorio seleccionable con la
+variable `DB_BACKEND`:
+
+```txt
+DB_BACKEND=postgres   # por defecto: guarda cada sesion como JSONB en PostgreSQL
+DB_BACKEND=json       # respaldo sin dependencias: data/sessions.json
+```
+
+- `postgres` requiere una base viva en `DATABASE_URL`. La tabla `sessions` se crea
+  sola en el primer uso (sin migraciones). Ejemplo local:
+  `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/meetingdb`.
+- `json` no necesita nada instalado; util para demos y para correr los tests.
+- Con `DATA_FILE` puedes fijar una ruta absoluta para el JSON (si no, es relativa
+  al directorio desde donde lanzas uvicorn).
+
+## Ejecutar con Docker
+
+`docker-compose.yml` levanta los tres servicios (PostgreSQL + backend + frontend)
+ya conectados entre si:
+
+```bash
+docker compose up --build
+```
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+- PostgreSQL: `localhost:5432` (usuario/clave/base `postgres` / `postgres` / `meetingdb`)
+
+El backend queda con `DB_BACKEND=postgres` y `LLM_PROVIDER=mock`. Para usar IA real,
+cambia en el compose `LLM_PROVIDER=gemini` y agrega `GEMINI_API_KEY`.
 
 ## LLM local recomendado
 

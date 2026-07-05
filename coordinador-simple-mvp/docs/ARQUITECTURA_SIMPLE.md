@@ -9,7 +9,7 @@ flowchart LR
   API --> LLM["LLM Service"]
   API --> SVC["Session Service"]
   SVC --> ENG["Decision Engine"]
-  SVC --> JSON["sessions.json"]
+  SVC --> R["Repositorio (Postgres / JSON)"]
 ```
 
 ## Secuencia principal
@@ -21,7 +21,7 @@ sequenceDiagram
   participant API as FastAPI
   participant L as LLM Service
   participant E as Decision Engine
-  participant R as JSON Repository
+  participant R as Repositorio
 
   U->>F: Crea sesion
   F->>API: POST /api/sessions
@@ -53,6 +53,7 @@ sequenceDiagram
 | Metodo | Ruta | Uso |
 | --- | --- | --- |
 | GET | `/health` | Verificar backend. |
+| GET | `/api/runtime` | Ver provider LLM activo, cache, fallback y warnings. |
 | POST | `/api/sessions` | Crear sesion. |
 | GET | `/api/sessions/{id}` | Obtener sesion. |
 | POST | `/api/sessions/{id}/message` | Extraer disponibilidad con LLM. |
@@ -60,6 +61,9 @@ sequenceDiagram
 | POST | `/api/sessions/{id}/availability` | Agregar disponibilidad manual. |
 | POST | `/api/sessions/{id}/calculate` | Calcular mejores horarios. |
 | POST | `/api/sessions/{id}/confirm` | Confirmar opcion. |
+| PATCH | `/api/sessions/{id}/channel/config` | Configurar escucha e invocacion del canal. |
+| POST | `/api/sessions/{id}/channel/messages` | Enviar un mensaje al canal simulado. |
+| POST | `/api/sessions/{id}/channel/batch` | Enviar varios mensajes al canal de una vez. |
 
 ## Modelo minimo
 

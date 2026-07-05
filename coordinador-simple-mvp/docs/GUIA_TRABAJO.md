@@ -59,7 +59,7 @@ Archivos principales:
 - `backend/app/services/llm_service.py`
 - `backend/app/services/session_service.py`
 - `backend/app/services/decision_engine.py`
-- `backend/app/storage/json_repository.py`
+- `backend/app/storage/postgres_repository.py` y `backend/app/storage/json_repository.py`
 
 ## Flujo de trabajo sugerido
 
@@ -84,7 +84,6 @@ Yo puedo lunes en la tarde, Camila puede lunes desde las 16 y Diego puede martes
 - Login.
 - Google Calendar real.
 - WhatsApp real.
-- Base de datos.
 - OAuth.
 - Multiempresa.
 - Dashboard.
