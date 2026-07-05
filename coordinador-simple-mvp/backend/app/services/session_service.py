@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 
 from app.schemas import ChannelMessage, ChatMessage, ExtractedAvailability, Participant, Session, TimeOption, TimeSlot, TokenUsage
-from app.services.decision_engine import build_availability_matrix, build_insights, calculate_options, find_missing_info
+from app.services.decision_engine import build_availability_matrix, build_insights, find_missing_info, options_from_matrix
 from app.settings import settings
 
 # Selector de almacenamiento por DB_BACKEND (postgres por defecto, json como respaldo
@@ -117,8 +117,9 @@ class SessionService:
 
     def calculate(self, session_id: str) -> Session:
         session = self.get(session_id)
-        session.options = calculate_options(session)
-        session.availability_matrix = build_availability_matrix(session)
+        matrix = build_availability_matrix(session)
+        session.availability_matrix = matrix
+        session.options = options_from_matrix(matrix)
         session.missing_info = find_missing_info(session)
         session.insights = build_insights(session)
         if session.options:

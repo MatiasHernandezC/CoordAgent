@@ -8,8 +8,10 @@ WORKDAY_END = 18
 
 
 def calculate_options(session: Session) -> list[TimeOption]:
-    matrix = build_availability_matrix(session)
+    return options_from_matrix(build_availability_matrix(session))
 
+
+def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
     # Diversifica las opciones: un solo bloque (el mejor) por dia, para no ofrecer
     # tres horas seguidas del mismo grupo. La matriz llega ordenada por dia y hora
     # ascendente, asi que ante empate de score se conserva el bloque mas temprano.
