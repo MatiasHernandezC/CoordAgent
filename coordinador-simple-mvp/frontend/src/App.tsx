@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   addAvailability,
-  addParticipant,
   calculateOptions,
   configureChannel,
   confirmOption,
@@ -40,6 +39,7 @@ export function App() {
   const [channelText, setChannelText] = useState("yo puedo lunes en la tarde");
   const [triggerWord, setTriggerWord] = useState("@coordina");
   const [listeningEnabled, setListeningEnabled] = useState(true);
+  const [inputMode, setInputMode] = useState<"form" | "channel">("form");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [lastElapsedMs, setLastElapsedMs] = useState<number | null>(null);
   const [lastTokenUsage, setLastTokenUsage] = useState<TokenUsage | null>(null);
@@ -104,9 +104,9 @@ export function App() {
     if (!session || !manualName.trim()) return;
 
     await runAction("Agregando correccion manual...", async () => {
-      const participantResponse = await addParticipant(session.id, manualName.trim());
+      // El backend crea el participante si no existe, asi que basta una sola llamada.
       const availabilityResponse = await addAvailability(
-        participantResponse.session.id,
+        session.id,
         manualName.trim(),
         manualDay,
         manualStart,
@@ -220,225 +220,253 @@ export function App() {
         <Metric title="Costo Gemini" value={tokenTotals.totalTokens ? `$${tokenTotals.estimatedCostUsd.toFixed(6)}` : "-"} detail={`${tokenTotals.totalTokens} tokens reales`} />
       </section>
 
-      <section className="surface channel-section">
+      <section className="surface step-block">
         <div className="section-heading">
-          <span className="step-badge">0</span>
+          <span className="step-badge">1</span>
           <div>
-            <h2>Simulador de canal tipo WhatsApp</h2>
-            <p>
-              Carga mensajes como si vinieran de un grupo. El agente escucha el canal y responde solo cuando aparece la
-              palabra de invocacion.
-            </p>
+            <h2>Crear sesion</h2>
+            <p>Empieza aqui: nombra la reunion para habilitar los pasos siguientes.</p>
+          </div>
+        </div>
+        <form className="session-form" onSubmit={handleCreateSession}>
+          <label>
+            Nombre de la reunion
+            <input value={title} onChange={(event) => setTitle(event.target.value)} />
+          </label>
+          <button type="submit" disabled={loading}>
+            {session ? "Crear otra sesion" : "Crear sesion"}
+          </button>
+        </form>
+        {session ? (
+          <div className="session-chip">
+            <span className="session-dot" aria-hidden="true" />
+            Sesion activa: <strong>{session.title}</strong>
+          </div>
+        ) : (
+          <p className="hint-text">Aun no hay sesion activa. Crea una para comenzar.</p>
+        )}
+      </section>
+
+      <section className="surface step-block">
+        <div className="section-heading">
+          <span className="step-badge">2</span>
+          <div>
+            <h2>Ingresar disponibilidad</h2>
+            <p>Captura los horarios de dos formas. Elige una pestana; puedes combinarlas.</p>
           </div>
         </div>
 
-        <div className="channel-grid">
-          <div className="channel-controls">
-            <form className="channel-config" onSubmit={handleConfigureChannel}>
-              <label>
-                Palabra de invocacion
-                <input value={triggerWord} onChange={(event) => setTriggerWord(event.target.value)} disabled={!session} />
-              </label>
-              <label className="switch-row">
-                <input
-                  type="checkbox"
-                  checked={listeningEnabled}
-                  onChange={(event) => setListeningEnabled(event.target.checked)}
-                  disabled={!session}
-                />
-                <span>Agente escuchando el canal</span>
-              </label>
-              <button type="submit" disabled={!session || loading}>
-                Guardar escucha
-              </button>
-            </form>
+        <div className="tab-bar" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={inputMode === "form"}
+            className={inputMode === "form" ? "tab-btn active" : "tab-btn"}
+            onClick={() => setInputMode("form")}
+          >
+            Mensaje directo
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={inputMode === "channel"}
+            className={inputMode === "channel" ? "tab-btn active" : "tab-btn"}
+            onClick={() => setInputMode("channel")}
+          >
+            Canal simulado (WhatsApp)
+          </button>
+        </div>
 
-            <form className="channel-composer" onSubmit={handleSendChannelMessage}>
+        {!session ? (
+          <EmptyState text="Crea una sesion en el paso 1 para habilitar la entrada de disponibilidad." />
+        ) : inputMode === "form" ? (
+          <div className="mode-panel">
+            <form className="stack" onSubmit={handleSendMessage}>
               <label>
-                Remitente
-                <input
-                  value={channelSender}
-                  onChange={(event) => setChannelSender(event.target.value)}
-                  disabled={!session}
-                />
-              </label>
-              <label>
-                Mensaje al canal
+                Mensaje del grupo
                 <textarea
-                  value={channelText}
-                  onChange={(event) => setChannelText(event.target.value)}
-                  rows={4}
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  rows={6}
                   disabled={!session}
                 />
               </label>
               <div className="button-row">
-                <button type="button" className="secondary-button" onClick={handleLoadChannelExample} disabled={!session || loading}>
-                  Cargar conversacion ejemplo
+                <button type="button" className="secondary-button" onClick={() => setMessage(EXAMPLE)}>
+                  Usar ejemplo
                 </button>
-                <button type="submit" disabled={!session || loading || !channelText.trim()}>
-                  Enviar al canal
+                <button type="submit" disabled={!session || loading}>
+                  Extraer con LLM
                 </button>
               </div>
             </form>
 
-            <ListeningPipeline session={session} />
+            <form className="manual-box" onSubmit={handleAddManual}>
+              <h3>Correccion manual rapida</h3>
+              <div className="manual-grid">
+                <input
+                  value={manualName}
+                  onChange={(event) => setManualName(event.target.value)}
+                  placeholder="Participante"
+                  disabled={!session}
+                />
+                <select value={manualDay} onChange={(event) => setManualDay(event.target.value as Day)} disabled={!session}>
+                  {DAYS.map((day) => (
+                    <option key={day} value={day}>
+                      {day}
+                    </option>
+                  ))}
+                </select>
+                <input value={manualStart} onChange={(event) => setManualStart(event.target.value)} disabled={!session} />
+                <input value={manualEnd} onChange={(event) => setManualEnd(event.target.value)} disabled={!session} />
+              </div>
+              <button type="submit" disabled={!session || loading || !manualName.trim()}>
+                Agregar disponibilidad
+              </button>
+            </form>
           </div>
+        ) : (
+          <div className="channel-grid">
+            <div className="channel-controls">
+              <form className="channel-config" onSubmit={handleConfigureChannel}>
+                <label>
+                  Palabra de invocacion
+                  <input value={triggerWord} onChange={(event) => setTriggerWord(event.target.value)} disabled={!session} />
+                </label>
+                <label className="switch-row">
+                  <input
+                    type="checkbox"
+                    checked={listeningEnabled}
+                    onChange={(event) => setListeningEnabled(event.target.checked)}
+                    disabled={!session}
+                  />
+                  <span>Agente escuchando el canal</span>
+                </label>
+                <button type="submit" disabled={!session || loading}>
+                  Guardar escucha
+                </button>
+              </form>
 
-          <ChannelChat session={session} />
-          <StructuredPreview session={session} />
+              <form className="channel-composer" onSubmit={handleSendChannelMessage}>
+                <label>
+                  Remitente
+                  <input
+                    value={channelSender}
+                    onChange={(event) => setChannelSender(event.target.value)}
+                    disabled={!session}
+                  />
+                </label>
+                <label>
+                  Mensaje al canal
+                  <textarea
+                    value={channelText}
+                    onChange={(event) => setChannelText(event.target.value)}
+                    rows={4}
+                    disabled={!session}
+                  />
+                </label>
+                <div className="button-row">
+                  <button type="button" className="secondary-button" onClick={handleLoadChannelExample} disabled={!session || loading}>
+                    Cargar conversacion ejemplo
+                  </button>
+                  <button type="submit" disabled={!session || loading || !channelText.trim()}>
+                    Enviar al canal
+                  </button>
+                </div>
+              </form>
+
+              <ListeningPipeline session={session} />
+            </div>
+
+            <ChannelChat session={session} />
+            <StructuredPreview session={session} />
+          </div>
+        )}
+
+        <div className="button-row final-actions">
+          <button type="button" disabled={!session || loading} onClick={handleCalculate}>
+            Calcular mejores horarios
+          </button>
+          {llmSource ? (
+            <span className="source-pill">
+              LLM: {llmSource}
+              {lastElapsedMs !== null ? ` - ${formatElapsed(lastElapsedMs)}` : ""}
+              {lastTokenUsage ? ` - ${formatTokenUsage(lastTokenUsage)}` : ""}
+            </span>
+          ) : null}
         </div>
       </section>
 
-      <section className="main-grid">
-        <section className="surface work-panel">
-          <div className="section-heading">
-            <span className="step-badge">1</span>
-            <div>
-              <h2>Entrada de coordinacion</h2>
-              <p>Primero crea una sesion, luego envia texto libre para que el LLM lo convierta en datos.</p>
-            </div>
-          </div>
-
-          <form className="stack" onSubmit={handleCreateSession}>
-            <label>
-              Nombre de la reunion
-              <input value={title} onChange={(event) => setTitle(event.target.value)} />
-            </label>
-            <button type="submit" disabled={loading}>
-              Crear sesion
-            </button>
-          </form>
-
-          <form className="stack" onSubmit={handleSendMessage}>
-            <label>
-              Mensaje del grupo
-              <textarea
-                value={message}
-                onChange={(event) => setMessage(event.target.value)}
-                rows={7}
-                disabled={!session}
-              />
-            </label>
-            <div className="button-row">
-              <button type="button" className="secondary-button" onClick={() => setMessage(EXAMPLE)}>
-                Usar ejemplo
-              </button>
-              <button type="submit" disabled={!session || loading}>
-                Extraer con LLM
-              </button>
-            </div>
-          </form>
-
-          <form className="manual-box" onSubmit={handleAddManual}>
-            <h3>Correccion manual rapida</h3>
-            <div className="manual-grid">
-              <input
-                value={manualName}
-                onChange={(event) => setManualName(event.target.value)}
-                placeholder="Participante"
-                disabled={!session}
-              />
-              <select value={manualDay} onChange={(event) => setManualDay(event.target.value as Day)} disabled={!session}>
-                {DAYS.map((day) => (
-                  <option key={day} value={day}>
-                    {day}
-                  </option>
-                ))}
-              </select>
-              <input value={manualStart} onChange={(event) => setManualStart(event.target.value)} disabled={!session} />
-              <input value={manualEnd} onChange={(event) => setManualEnd(event.target.value)} disabled={!session} />
-            </div>
-            <button type="submit" disabled={!session || loading || !manualName.trim()}>
-              Agregar disponibilidad
-            </button>
-          </form>
-
-          <div className="button-row final-actions">
-            <button type="button" disabled={!session || loading} onClick={handleCalculate}>
-              Calcular mejores horarios
-            </button>
-            {llmSource ? (
-              <span className="source-pill">
-                LLM: {llmSource}
-                {lastElapsedMs !== null ? ` - ${formatElapsed(lastElapsedMs)}` : ""}
-                {lastTokenUsage ? ` - ${formatTokenUsage(lastTokenUsage)}` : ""}
-              </span>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="surface">
-          <div className="section-heading">
-            <span className="step-badge">2</span>
-            <div>
-              <h2>Lo que el sistema entendio</h2>
-              <p>Esta vista hace visible el valor del LLM: texto informal convertido en datos revisables.</p>
-            </div>
-          </div>
-
-          {session?.missing_info.length ? (
-            <div className="warning-box">
-              <strong>Datos faltantes</strong>
-              {session.missing_info.map((item) => (
-                <p key={item}>{item}</p>
-              ))}
-            </div>
-          ) : null}
-
-          {session?.participants.length ? (
-            <div className="participant-list">
-              {session.participants.map((participant) => (
-                <article className="participant-card" key={participant.id}>
-                  <div className="participant-title">
-                    <h3>{participant.name}</h3>
-                    <span>{participant.availability.length} horario(s)</span>
-                  </div>
-                  {participant.availability.length ? (
-                    <div className="slot-list">
-                      {participant.availability.map((slot) => (
-                        <span className="slot-pill" key={`${slot.day}-${slot.start}-${slot.end}`}>
-                          {slot.day} {slot.start}-{slot.end}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="muted">Sin horario claro.</p>
-                  )}
-                </article>
-              ))}
-            </div>
-          ) : (
-            <EmptyState text="Crea una sesion y envia un mensaje para ver participantes y horarios." />
-          )}
-
-          {session?.insights.length ? (
-            <div className="insight-box">
-              <h3>Lectura del sistema</h3>
-              {session.insights.map((insight) => (
-                <p key={insight}>{insight}</p>
-              ))}
-            </div>
-          ) : null}
-
-          {session?.messages.length ? (
-            <div className="timeline-box">
-              <h3>Historial</h3>
-              {session.messages.slice(-5).map((item) => (
-                <div className={`timeline-item ${item.role}`} key={item.id}>
-                  <span className="timeline-meta">{item.role}{item.source ? ` - ${item.source}` : ""}</span>
-                  <span>{item.role}{item.source ? ` · ${item.source}` : ""}</span>
-                  <p>{item.content}</p>
-                  {item.token_usage ? <small>{formatTokenUsage(item.token_usage)}</small> : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </section>
-      </section>
-
-      <section className="surface heatmap-section">
+      <section className="surface step-block">
         <div className="section-heading">
           <span className="step-badge">3</span>
+          <div>
+            <h2>Lo que el sistema entendio</h2>
+            <p>El texto informal convertido en datos revisables y corregibles.</p>
+          </div>
+        </div>
+
+        {session?.missing_info.length ? (
+          <div className="warning-box">
+            <strong>Datos faltantes</strong>
+            {session.missing_info.map((item) => (
+              <p key={item}>{item}</p>
+            ))}
+          </div>
+        ) : null}
+
+        {session?.participants.length ? (
+          <div className="participant-list">
+            {session.participants.map((participant) => (
+              <article className="participant-card" key={participant.id}>
+                <div className="participant-title">
+                  <h3>{participant.name}</h3>
+                  <span>{participant.availability.length} horario(s)</span>
+                </div>
+                {participant.availability.length ? (
+                  <div className="slot-list">
+                    {participant.availability.map((slot) => (
+                      <span className="slot-pill" key={`${slot.day}-${slot.start}-${slot.end}`}>
+                        {slot.day} {slot.start}-{slot.end}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">Sin horario claro.</p>
+                )}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState text="Crea una sesion y envia un mensaje para ver participantes y horarios." />
+        )}
+
+        {session?.insights.length ? (
+          <div className="insight-box">
+            <h3>Lectura del sistema</h3>
+            {session.insights.map((insight) => (
+              <p key={insight}>{insight}</p>
+            ))}
+          </div>
+        ) : null}
+
+        {session?.messages.length ? (
+          <div className="timeline-box">
+            <h3>Historial</h3>
+            {session.messages.slice(-5).map((item) => (
+              <div className={`timeline-item ${item.role}`} key={item.id}>
+                <span className="timeline-meta">{item.role}{item.source ? ` - ${item.source}` : ""}</span>
+                <p>{item.content}</p>
+                {item.token_usage ? <small>{formatTokenUsage(item.token_usage)}</small> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="surface step-block">
+        <div className="section-heading">
+          <span className="step-badge">4</span>
           <div>
             <h2>Mapa de disponibilidad</h2>
             <p>Mientras mas intenso el bloque, mas participantes pueden asistir en ese horario.</p>
@@ -451,11 +479,11 @@ export function App() {
         )}
       </section>
 
-      <section className="surface options-section">
+      <section className="surface step-block">
         <div className="section-heading">
-          <span className="step-badge">4</span>
+          <span className="step-badge">5</span>
           <div>
-            <h2>Opciones sugeridas y explicadas</h2>
+            <h2>Opciones y decision</h2>
             <p>El motor Python calcula la decision. El LLM ya no participa en esta parte.</p>
           </div>
         </div>
@@ -544,7 +572,7 @@ function ChannelChat({ session }: { session: Session | null }) {
           ))
         ) : (
           <div className="chat-empty">
-            Crea una sesion y carga mensajes. La ultima frase del ejemplo invoca al agente con @coordina.
+            Carga mensajes o escribe uno. La ultima frase del ejemplo invoca al agente con @coordina.
           </div>
         )}
       </div>

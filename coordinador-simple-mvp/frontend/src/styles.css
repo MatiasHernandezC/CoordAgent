@@ -1026,3 +1026,86 @@ h3 {
     height: 460px;
   }
 }
+
+.step-block {
+  margin-bottom: 18px;
+}
+
+.session-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.session-form label {
+  flex: 1 1 260px;
+}
+
+.session-form button {
+  flex: 0 0 auto;
+}
+
+.session-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: #1d5b41;
+  font-weight: 800;
+}
+
+.session-chip strong {
+  color: #102f44;
+}
+
+.session-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #2f9e6f;
+  box-shadow: 0 0 0 3px rgba(47, 158, 111, 0.18);
+}
+
+.hint-text {
+  margin-top: 14px;
+  color: #65717a;
+  font-weight: 700;
+}
+
+.tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid #e2e9ec;
+}
+
+.tab-btn {
+  min-height: auto;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 16px;
+  background: transparent;
+  color: #52616c;
+  box-shadow: none;
+  border-bottom: 3px solid transparent;
+}
+
+.tab-btn:hover:not(:disabled) {
+  background: transparent;
+  color: #102f44;
+  box-shadow: none;
+  transform: none;
+}
+
+.tab-btn.active {
+  color: #226b5f;
+  border-bottom-color: #226b5f;
+}
+
+.mode-panel {
+  display: grid;
+  gap: 18px;
+}
