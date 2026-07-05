@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import {
   addAvailability,
@@ -11,20 +11,19 @@ import {
   sendChannelMessage,
   sendMessage
 } from "./api";
-import type { AvailabilityCell, Day, RuntimeInfo, Session, TokenUsage } from "./types";
-
-const EXAMPLE =
-  "Yo puedo lunes en la tarde, Camila puede lunes desde las 16 y Diego puede martes en la manana, Pedro puede a cualquier hora todos los dias";
-const CHANNEL_EXAMPLE = [
-  { sender: "Nicolas", text: "yo puedo lunes en la tarde" },
-  { sender: "Camila", text: "yo puedo lunes desde las 16" },
-  { sender: "Diego", text: "yo puedo martes en la manana" },
-  { sender: "Pedro", text: "puedo a cualquier hora todos los dias" },
-  { sender: "Nicolas", text: "@coordina nos ayudas a cerrar un horario?" }
-];
-
-const DAYS: Day[] = ["lunes", "martes", "miercoles", "jueves", "viernes"];
-const HOURS = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"];
+import { CHANNEL_EXAMPLE, DAYS, EXAMPLE } from "./constants";
+import {
+  calculateTokenTotals,
+  formatElapsed,
+  formatStatus,
+  formatTokenTotals,
+  formatTokenUsage,
+  getErrorMessage
+} from "./format";
+import { AvailabilityHeatmap } from "./components/AvailabilityHeatmap";
+import { ChannelChat, ListeningPipeline, StructuredPreview } from "./components/channel";
+import { EmptyState, LogoMark, Metric } from "./components/ui";
+import type { Day, RuntimeInfo, Session, TokenUsage } from "./types";
 
 export function App() {
   const [title, setTitle] = useState("Reunion grupal");
@@ -524,251 +523,4 @@ export function App() {
       </section>
     </main>
   );
-}
-
-function LogoMark() {
-  return (
-    <div className="logo-mark" aria-hidden="true">
-      <span className="logo-node node-a" />
-      <span className="logo-node node-b" />
-      <span className="logo-node node-c" />
-    </div>
-  );
-}
-
-function ChannelChat({ session }: { session: Session | null }) {
-  const messages = session?.channel_messages ?? [];
-  const threadRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const thread = threadRef.current;
-    if (thread) {
-      thread.scrollTop = thread.scrollHeight;
-    }
-  }, [messages.length, session?.last_agent_reply]);
-
-  return (
-    <div className="phone-frame">
-      <div className="phone-header">
-        <div>
-          <strong>Grupo Proyecto TAVI</strong>
-          <span>{session?.channel_config.listening_enabled ? "agente escuchando" : "escucha pausada"}</span>
-        </div>
-        <span className="trigger-chip">{session?.channel_config.trigger_word ?? "@coordina"}</span>
-      </div>
-
-      <div className="chat-thread" ref={threadRef}>
-        {messages.length ? (
-          messages.map((message) => (
-            <article
-              className={`chat-bubble ${message.kind === "agent" ? "agent" : "human"} ${
-                message.detected_invocation ? "invoked" : ""
-              }`}
-              key={message.id}
-            >
-              <span>{message.sender}</span>
-              <p>{message.text}</p>
-            </article>
-          ))
-        ) : (
-          <div className="chat-empty">
-            Carga mensajes o escribe uno. La ultima frase del ejemplo invoca al agente con @coordina.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ListeningPipeline({ session }: { session: Session | null }) {
-  const invoked = Boolean(session?.channel_messages.some((message) => message.detected_invocation));
-  const steps = [
-    { label: "Escucha", done: Boolean(session?.channel_config.listening_enabled) },
-    { label: "Invocacion", done: invoked },
-    { label: "Estructura LLM", done: Boolean(session?.participants.length) },
-    { label: "Decision Python", done: Boolean(session?.options.length) },
-    { label: "Respuesta", done: Boolean(session?.last_agent_reply) }
-  ];
-
-  return (
-    <div className="pipeline-box">
-      {steps.map((step) => (
-        <div className={step.done ? "pipeline-step done" : "pipeline-step"} key={step.label}>
-          <span />
-          <strong>{step.label}</strong>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function StructuredPreview({ session }: { session: Session | null }) {
-  return (
-    <div className="structured-preview">
-      <div className="preview-heading">
-        <h3>Formato estructurado</h3>
-        <span>{session?.participants.length ?? 0} participantes</span>
-      </div>
-      <pre>{JSON.stringify(buildStructuredPreview(session), null, 2)}</pre>
-    </div>
-  );
-}
-
-function AvailabilityHeatmap({
-  matrix,
-  totalParticipants
-}: {
-  matrix: AvailabilityCell[];
-  totalParticipants: number;
-}) {
-  const byKey = new Map(matrix.map((cell) => [`${cell.day}-${cell.start}`, cell]));
-
-  return (
-    <div className="heatmap-wrap">
-      <div className="heatmap-grid">
-        <div className="heatmap-corner">Hora</div>
-        {DAYS.map((day) => (
-          <div className="heatmap-day" key={day}>
-            {day}
-          </div>
-        ))}
-        {HOURS.map((hour) => (
-          <FragmentRow key={hour} hour={hour} byKey={byKey} totalParticipants={totalParticipants} />
-        ))}
-      </div>
-      <div className="heatmap-legend">
-        <span className="legend-cell low" /> baja
-        <span className="legend-cell mid" /> media
-        <span className="legend-cell high" /> alta
-      </div>
-    </div>
-  );
-}
-
-function FragmentRow({
-  hour,
-  byKey,
-  totalParticipants
-}: {
-  hour: string;
-  byKey: Map<string, AvailabilityCell>;
-  totalParticipants: number;
-}) {
-  return (
-    <>
-      <div className="heatmap-hour">{hour}</div>
-      {DAYS.map((day) => {
-        const cell = byKey.get(`${day}-${hour}`);
-        const level = getHeatLevel(cell?.coverage_percent ?? 0);
-        return (
-          <div className={`heatmap-cell ${level}`} key={`${day}-${hour}`} title={cell?.available_participants.join(", ")}>
-            <strong>{cell?.score ?? 0}/{totalParticipants || 0}</strong>
-            <span>{cell?.coverage_percent ?? 0}%</span>
-          </div>
-        );
-      })}
-    </>
-  );
-}
-
-function Metric({ title, value, detail }: { title: string; value: string | number; detail: string }) {
-  return (
-    <article className="metric-card">
-      <span>{title}</span>
-      <strong>{value}</strong>
-      <p>{detail}</p>
-    </article>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return <div className="empty-state">{text}</div>;
-}
-
-function formatStatus(status: Session["status"] | undefined) {
-  if (!status) return "sin sesion";
-  if (status === "draft") return "borrador";
-  if (status === "calculated") return "calculada";
-  return "confirmada";
-}
-
-function formatElapsed(ms: number) {
-  if (ms < 1000) return `${ms} ms`;
-  return `${(ms / 1000).toFixed(1)} s`;
-}
-
-function formatTokenUsage(usage: TokenUsage) {
-  if (usage.cached) return "cache: 0 tokens";
-  return `${usage.total_tokens} tokens, costo aprox. $${usage.estimated_cost_usd.toFixed(6)}`;
-}
-
-function formatTokenTotals(totals: TokenTotals) {
-  return `${totals.totalTokens} tokens, $${totals.estimatedCostUsd.toFixed(6)}`;
-}
-
-type TokenTotals = {
-  totalTokens: number;
-  estimatedCostUsd: number;
-};
-
-function calculateTokenTotals(session: Session | null): TokenTotals {
-  if (!session) {
-    return { totalTokens: 0, estimatedCostUsd: 0 };
-  }
-
-  return session.messages.reduce<TokenTotals>(
-    (totals, message) => {
-      if (!message.token_usage || message.token_usage.cached) {
-        return totals;
-      }
-
-      return {
-        totalTokens: totals.totalTokens + message.token_usage.total_tokens,
-        estimatedCostUsd: totals.estimatedCostUsd + message.token_usage.estimated_cost_usd
-      };
-    },
-    { totalTokens: 0, estimatedCostUsd: 0 }
-  );
-}
-
-function getHeatLevel(percent: number) {
-  if (percent >= 75) return "high";
-  if (percent >= 40) return "mid";
-  if (percent > 0) return "low";
-  return "zero";
-}
-
-function buildStructuredPreview(session: Session | null) {
-  if (!session) {
-    return {
-      canal: "simulado",
-      estado: "sin_sesion",
-      trigger: "@coordina",
-      participantes: [],
-      opciones: []
-    };
-  }
-
-  return {
-    objetivo: session.title,
-    canal: "grupo_tipo_whatsapp_simulado",
-    escucha_activa: session.channel_config.listening_enabled,
-    trigger: session.channel_config.trigger_word,
-    participantes: session.participants.map((participant) => ({
-      nombre: participant.name,
-      disponibilidad: participant.availability.map((slot) => `${slot.day} ${slot.start}-${slot.end}`)
-    })),
-    faltantes: session.missing_info,
-    opciones: session.options.slice(0, 3).map((option) => ({
-      horario: `${option.day} ${option.start}-${option.end}`,
-      cobertura: `${option.coverage_percent}%`,
-      asisten: option.available_participants,
-      no_calzan: option.unavailable_participants
-    })),
-    respuesta_agente: session.last_agent_reply
-  };
-}
-
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Ocurrio un error inesperado";
 }
