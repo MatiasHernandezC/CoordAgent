@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Day = Literal["lunes", "martes", "miercoles", "jueves", "viernes"]
 SessionStatus = Literal["draft", "calculated", "confirmed"]
@@ -127,6 +127,14 @@ class AddAvailabilityRequest(BaseModel):
     day: Day
     start: str = Field(pattern=r"^\d{2}:\d{2}$")
     end: str = Field(pattern=r"^\d{2}:\d{2}$")
+
+    @model_validator(mode="after")
+    def check_start_before_end(self) -> "AddAvailabilityRequest":
+        # Como el formato es HH:MM con cero a la izquierda, comparar como texto ordena
+        # bien dentro del dia. Evita el no-op silencioso cuando inicio >= fin.
+        if self.start >= self.end:
+            raise ValueError("La hora de inicio debe ser anterior a la hora de fin.")
+        return self
 
 
 class ChannelConfigRequest(BaseModel):

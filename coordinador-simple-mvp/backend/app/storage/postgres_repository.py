@@ -1,5 +1,4 @@
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 import json
 
 from app.schemas import Session
@@ -10,10 +9,13 @@ class PostgresRepository:
     def __init__(self, database_url: str | None = None):
         url = database_url or settings.database_url
         self.engine = create_engine(url, pool_pre_ping=True)
-        self._ensure_table()
+        self._table_ready = False
 
     def _ensure_table(self) -> None:
-        """Crea la tabla si no existe. Sin migraciones externas para mantenerlo simple."""
+        """Crea la tabla si no existe. Conexion perezosa: se ejecuta en el primer
+        uso real, no al importar el modulo, para no exigir Postgres solo por importar."""
+        if self._table_ready:
+            return
         with self.engine.begin() as conn:
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -22,8 +24,10 @@ class PostgresRepository:
                     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """))
+        self._table_ready = True
 
     def save(self, session: Session) -> Session:
+        self._ensure_table()
         payload = json.dumps(session.model_dump(), ensure_ascii=False, default=str)
         with self.engine.begin() as conn:
             conn.execute(
@@ -39,6 +43,7 @@ class PostgresRepository:
         return session
 
     def get(self, session_id: str) -> Session | None:
+        self._ensure_table()
         with self.engine.connect() as conn:
             row = conn.execute(
                 text("SELECT data FROM sessions WHERE id = :id"),
@@ -56,6 +61,7 @@ class PostgresRepository:
 
     def list_all(self) -> list[Session]:
         """Útil para admin/debug — no lo tenías en JSON pero es gratis aquí."""
+        self._ensure_table()
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text("SELECT data FROM sessions ORDER BY updated_at DESC")
@@ -63,6 +69,7 @@ class PostgresRepository:
         return [Session.model_validate(row[0]) for row in rows]
 
     def delete(self, session_id: str) -> bool:
+        self._ensure_table()
         with self.engine.begin() as conn:
             result = conn.execute(
                 text("DELETE FROM sessions WHERE id = :id"),

@@ -8,7 +8,6 @@ WORKDAY_END = 18
 
 
 def calculate_options(session: Session) -> list[TimeOption]:
-    participant_names = [participant.name for participant in session.participants]
     matrix = build_availability_matrix(session)
 
     options: list[TimeOption] = []

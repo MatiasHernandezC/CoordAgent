@@ -10,7 +10,10 @@ def find_workspace_root(settings_file: Path) -> Path:
     for parent in settings_file.parents:
         if (parent / "local_llm.py").exists() and (parent / "models").exists():
             return parent
-    return settings_file.parents[4]
+    # Fallback tolerante a la profundidad de la ruta: en un contenedor (/app/app/...)
+    # no hay 5 niveles y parents[4] reventaria. Solo importa cuando LLM_PROVIDER=local.
+    parents = settings_file.parents
+    return parents[4] if len(parents) > 4 else parents[-1]
 
 
 WORKSPACE_ROOT = find_workspace_root(Path(__file__).resolve())
@@ -56,6 +59,10 @@ class Settings:
         "DATABASE_URL",
         "postgresql://user:password@localhost:5432/meetingdb",
     )
+
+    # Selector de almacenamiento: "postgres" (default) | "json".
+    # Con "json" la app corre sin Postgres usando data/sessions.json.
+    db_backend: str = os.getenv("DB_BACKEND", "postgres").strip().lower()
 
     # Almacenamiento legacy (conservado por si necesitas rollback)
     data_file: Path = Path(os.getenv("DATA_FILE", "data/sessions.json"))

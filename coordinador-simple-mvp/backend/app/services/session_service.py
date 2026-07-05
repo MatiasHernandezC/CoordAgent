@@ -2,8 +2,14 @@ from fastapi import HTTPException
 
 from app.schemas import ChannelMessage, ChatMessage, ExtractedAvailability, Participant, Session, TimeOption, TimeSlot, TokenUsage
 from app.services.decision_engine import build_availability_matrix, build_insights, calculate_options, find_missing_info
-#from app.storage.json_repository import repository
-from app.storage.postgres_repository import repository
+from app.settings import settings
+
+# Selector de almacenamiento por DB_BACKEND (postgres por defecto, json como respaldo
+# sin dependencias externas). Solo se importa el modulo elegido.
+if settings.db_backend == "json":
+    from app.storage.json_repository import repository
+else:
+    from app.storage.postgres_repository import repository
 
 
 class SessionService:
