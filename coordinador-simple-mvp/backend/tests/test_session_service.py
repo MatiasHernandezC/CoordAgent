@@ -100,6 +100,16 @@ def test_removal_without_slots_does_not_clear_existing_availability(tmp_path: Pa
     assert [(slot.day, slot.start, slot.end) for slot in camila.availability] == [("lunes", "16:00", "18:00")]
 
 
+def test_session_without_schema_version_defaults_to_1():
+    # Retrocompatibilidad: una sesion persistida antes de versionar el esquema
+    # (sin el campo schema_version) debe seguir validando con el default.
+    from app.schemas import Session
+
+    session = Session.model_validate({"title": "Sesion antigua sin version"})
+
+    assert session.schema_version == 1
+
+
 def slot_from(day: str, start: str, end: str):
     from app.schemas import TimeSlot
 

@@ -190,3 +190,26 @@ def test_repeated_message_is_served_from_cache(client):
     second = client.post(f"/api/sessions/{session_id}/message", json={"message": "Rodrigo puede viernes en la tarde"})
     assert first.json()["llm_source"] == "mock"
     assert second.json()["llm_source"] == "mock_cache"
+
+
+# --- Hardening (P3) ---------------------------------------------------------
+
+def test_new_session_exposes_schema_version(client):
+    session_id = _create(client)
+    response = client.get(f"/api/sessions/{session_id}")
+    assert response.json()["session"]["schema_version"] == 1
+
+
+def test_unexpected_error_returns_clean_500(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "mock")
+    session_module.repository = JsonRepository(tmp_path / "sessions.json")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("fallo interno simulado")
+
+    monkeypatch.setattr(session_module.session_service, "get", boom)
+    safe_client = TestClient(app, raise_server_exceptions=False)
+
+    response = safe_client.get("/api/sessions/cualquiera")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Error interno del servidor."}

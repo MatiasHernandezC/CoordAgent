@@ -79,6 +79,9 @@ class ChannelMessage(BaseModel):
 
 class Session(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
+    # Version del esquema persistido: permite detectar y migrar registros antiguos.
+    # Al tener default, las sesiones ya guardadas sin este campo siguen validando.
+    schema_version: int = 1
     title: str
     participants: list[Participant] = Field(default_factory=list)
     options: list[TimeOption] = Field(default_factory=list)
