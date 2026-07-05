@@ -10,29 +10,37 @@ WORKDAY_END = 18
 def calculate_options(session: Session) -> list[TimeOption]:
     matrix = build_availability_matrix(session)
 
-    options: list[TimeOption] = []
+    # Diversifica las opciones: un solo bloque (el mejor) por dia, para no ofrecer
+    # tres horas seguidas del mismo grupo. La matriz llega ordenada por dia y hora
+    # ascendente, asi que ante empate de score se conserva el bloque mas temprano.
+    best_by_day: dict[str, AvailabilityCell] = {}
     for cell in matrix:
         if cell.score == 0:
             continue
+        best = best_by_day.get(cell.day)
+        if best is None or cell.score > best.score:
+            best_by_day[cell.day] = cell
 
-        options.append(
-            TimeOption(
-                day=cell.day,
-                start=cell.start,
-                end=cell.end,
-                available_participants=cell.available_participants,
-                unavailable_participants=cell.unavailable_participants,
-                score=cell.score,
-                coverage_percent=cell.coverage_percent,
-                explanation=build_explanation(
-                    cell.available_participants,
-                    cell.unavailable_participants,
-                    cell.coverage_percent,
-                ),
-            )
+    options = [
+        TimeOption(
+            day=cell.day,  # type: ignore[arg-type]
+            start=cell.start,
+            end=cell.end,
+            available_participants=cell.available_participants,
+            unavailable_participants=cell.unavailable_participants,
+            score=cell.score,
+            coverage_percent=cell.coverage_percent,
+            explanation=build_explanation(
+                cell.available_participants,
+                cell.unavailable_participants,
+                cell.coverage_percent,
+            ),
         )
+        for cell in best_by_day.values()
+    ]
 
-    return sorted(options, key=lambda option: (-option.score, option.day, option.start))[:3]
+    # Mejor cobertura primero; ante empate, orden de la semana y luego hora.
+    return sorted(options, key=lambda option: (-option.score, WEEKDAYS.index(option.day), option.start))[:3]
 
 
 def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
