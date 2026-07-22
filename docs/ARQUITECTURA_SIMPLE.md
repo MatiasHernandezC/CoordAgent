@@ -1,119 +1,56 @@
-# Arquitectura simple
+# Arquitectura Simple
 
-## Vista general
+Resumen corto de la arquitectura. Para la version completa y operativa, usa
+[ARQUITECTURA.md](ARQUITECTURA.md).
 
 ```mermaid
 flowchart LR
-  U["Usuario"] --> F["React + TypeScript"]
-  F --> API["FastAPI BFF"]
-  API --> LLM["LLM Service"]
-  API --> SVC["Session Service"]
-  SVC --> ENG["Decision Engine"]
-  SVC --> R["Repositorio (Postgres / JSON)"]
+  Web["Panel React"] --> Caddy["Caddy HTTPS + Basic Auth API"]
+  Caddy --> API["FastAPI BFF"]
+  API --> DB["PostgreSQL"]
+  API --> LLM["Gemini + fallback reglas"]
+  API --> Engine["Decision engine"]
+  API --> Image["Imagen calendario"]
+
+  WA["Grupo WhatsApp"] <--> Gateway["Gateway Baileys"]
+  Gateway --> API
 ```
 
-## Secuencia principal
-
-```mermaid
-sequenceDiagram
-  actor U as Usuario
-  participant F as Frontend
-  participant API as FastAPI
-  participant L as LLM Service
-  participant E as Decision Engine
-  participant R as Repositorio
-
-  U->>F: Crea sesion
-  F->>API: POST /api/sessions
-  API->>R: Guardar sesion
-  API-->>F: session
-
-  U->>F: Escribe disponibilidad
-  F->>API: POST /api/sessions/{id}/message
-  API->>L: Extraer JSON
-  L-->>API: Participantes + horarios
-  API->>R: Guardar datos + historial
-  API-->>F: session actualizada
-
-  U->>F: Corrige dato manual si hace falta
-  F->>API: POST /api/sessions/{id}/availability
-  API->>R: Guardar disponibilidad
-  API-->>F: session actualizada
-
-  U->>F: Calcular
-  F->>API: POST /api/sessions/{id}/calculate
-  API->>E: Cruzar horarios
-  E-->>API: Top opciones + matriz de disponibilidad
-  API->>R: Guardar opciones
-  API-->>F: opciones
-```
-
-## Endpoints
-
-| Metodo | Ruta | Uso |
-| --- | --- | --- |
-| GET | `/health` | Verificar backend. |
-| GET | `/api/runtime` | Ver provider LLM activo, cache, fallback y warnings. |
-| POST | `/api/sessions` | Crear sesion. |
-| GET | `/api/sessions/{id}` | Obtener sesion. |
-| POST | `/api/sessions/{id}/message` | Extraer disponibilidad con LLM. |
-| POST | `/api/sessions/{id}/participants` | Agregar participante manualmente. |
-| POST | `/api/sessions/{id}/availability` | Agregar disponibilidad manual. |
-| POST | `/api/sessions/{id}/calculate` | Calcular mejores horarios. |
-| POST | `/api/sessions/{id}/confirm` | Confirmar opcion. |
-| PATCH | `/api/sessions/{id}/channel/config` | Configurar escucha e invocacion del canal. |
-| POST | `/api/sessions/{id}/channel/messages` | Enviar un mensaje al canal simulado. |
-| POST | `/api/sessions/{id}/channel/batch` | Enviar varios mensajes al canal de una vez. |
-
-## Modelo minimo
+## Idea Central
 
 ```txt
-Session
-  id
-  title
-  participants
-  options
-  availability_matrix
-  missing_info
-  insights
-  messages
-  selected_option
-  decision_summary
-  status
+WhatsApp y frontend capturan mensajes.
+LLM/fallback extraen disponibilidad.
+Python calcula opciones.
+PostgreSQL guarda sesiones e historial.
+Caddy protege y publica el sistema.
+```
 
-Participant
-  id
-  name
-  availability
+## Flujo Minimo
 
-TimeSlot
-  day
-  start
-  end
+1. El bot recibe mensajes en un grupo de WhatsApp.
+2. El gateway crea o reutiliza la sesion asociada al grupo.
+3. El backend guarda mensajes humanos hasta que aparece `@coordina`.
+4. El LLM extrae participantes, disponibilidades y remociones.
+5. El motor cruza horarios por bloques de una hora.
+6. El backend genera respuesta de texto y, si corresponde, imagen del calendario.
+7. El gateway responde al grupo.
+8. El administrador revisa sesiones, historial y formato de respuesta desde el panel.
 
-TimeOption
-  id
-  day
-  start
-  end
-  available_participants
-  unavailable_participants
-  score
-  coverage_percent
-  explanation
+## Componentes
 
-AvailabilityCell
-  day
-  start
-  end
-  available_participants
-  unavailable_participants
-  score
-  coverage_percent
+| Componente | Rol |
+| --- | --- |
+| `frontend/` | Panel administrativo y login visual. |
+| `backend/` | API, extraccion, calculo, persistencia y render de imagen. |
+| `gateway/` | Conexion WhatsApp y puente al backend. |
+| `db` | PostgreSQL interno. |
+| `caddy` | TLS, proxy, headers y Basic Auth para API. |
 
-ChatMessage
-  role
-  content
-  source
-  created_at
+## Regla De Diseno
+
+```txt
+El LLM no decide horarios.
+El motor Python no interpreta lenguaje natural.
+El administrador puede corregir el estado cuando el canal sea ambiguo.
 ```

@@ -90,7 +90,9 @@ POSTGRES_PASSWORD=...
 POSTGRES_DB=meetingdb
 
 LLM_PROVIDER=gemini
-GEMINI_API_KEY=...
+GEMINI_API_KEY=... # bootstrap: retirar despues de verificar la migracion
+LLM_KEYS_MASTER_KEY=...
+ADMIN_PROXY_HEADER_REQUIRED=true
 GEMINI_MODEL=gemini-2.5-flash-lite
 
 TRIGGER_WORD=@coordina
@@ -105,6 +107,22 @@ docker run --rm caddy:2 caddy hash-password --plaintext "tu_password"
 ```
 
 No imprimas ni pegues `.env.prod` en chats. El archivo contiene secretos.
+
+Genera una llave maestra de 32 bytes y guardala tambien en el custodio externo
+de secretos. No se incluye en los respaldos cifrados del proyecto:
+
+```bash
+openssl rand -base64 32
+```
+
+Al iniciar con `GEMINI_API_KEY` y `LLM_KEYS_MASTER_KEY`, el backend importa la
+llave heredada una sola vez como `Produccion heredada`. Verifica en el panel que
+aparezca cifrada y disponible; luego elimina `GEMINI_API_KEY` de `.env.prod` y
+recrea solo el backend. No elimines la llave maestra mientras existan
+credenciales cifradas.
+
+Las rutas `/api/admin/llm-keys*` requieren el usuario validado por Caddy. El
+frontend nunca guarda una llave Gemini en `localStorage` ni `sessionStorage`.
 
 ## Levantar Produccion
 
@@ -164,7 +182,12 @@ estoy libre lun de 3 a 5 pm
 me sirve mierc 15:30-17:00
 no me va bien martes de 10 a 12
 @coordina con imagen
+@coordina reinicia historial
 ```
+
+El ultimo comando comienza una coordinacion nueva en el mismo grupo. El panel
+conserva la ronda anterior para auditoria, pero el extractor deja de usar sus
+mensajes, participantes, opciones y decision.
 
 El panel web tambien ofrece un flujo para armar un mensaje de invitacion hacia
 el administrador, pero por ahora el ingreso del bot al grupo es manual.
