@@ -10,6 +10,8 @@ from fastapi import HTTPException
 
 from app.schemas import (
     ChannelMessage,
+    ChannelCommandReceipt,
+    ChannelConfig,
     ChatMessage,
     DecisionRecord,
     ExtractedAvailability,
@@ -21,7 +23,10 @@ from app.schemas import (
     TokenUsage,
 )
 from app.services.calendar_export import (
+    build_calendar_ics,
     build_google_calendar_url,
+    confirmed_event_date,
+    create_calendar_event_snapshot,
     format_long_date,
     format_short_date,
     option_event_date,
@@ -44,12 +49,21 @@ class SessionService:
         # distintos entre si.
         self._session_locks_guard = Lock()
         self._session_locks = {}
+        self._group_locks_guard = Lock()
+        self._group_locks = {}
 
     @contextmanager
     def session_lock(self, session_id: str):
         with self._session_locks_guard:
             lock = self._session_locks.setdefault(session_id, RLock())
 
+        with lock:
+            yield
+
+    @contextmanager
+    def group_lock(self, group_jid: str):
+        with self._group_locks_guard:
+            lock = self._group_locks.setdefault(group_jid, RLock())
         with lock:
             yield
 
@@ -68,11 +82,61 @@ class SessionService:
     def list_sessions(self) -> list[Session]:
         return repository.list_all()
 
+    def resolve_channel_group(
+        self,
+        group_jid: str,
+        group_name: str,
+        group_participant_count: int | None,
+        trigger_word: str,
+    ) -> Session:
+        """Create-or-get atomico por JID; un retry nunca crea otra sesion."""
+        clean_jid = group_jid.strip()
+        clean_name = group_name.strip() or "grupo de WhatsApp"
+        existing = next(
+            (
+                session
+                for session in repository.list_all()
+                if session.channel_config.group_jid == clean_jid
+            ),
+            None,
+        )
+        if existing:
+            existing.channel_config.listening_enabled = True
+            existing.channel_config.trigger_word = trigger_word.strip()
+            existing.channel_config.group_name = clean_name
+            existing.channel_config.group_participant_count = group_participant_count
+            existing.title = f"WhatsApp - {clean_name}"
+            return repository.save(existing)
+
+        session = Session(
+            title=f"WhatsApp - {clean_name}",
+            channel_config=ChannelConfig(
+                listening_enabled=True,
+                trigger_word=trigger_word.strip(),
+                group_jid=clean_jid,
+                group_name=clean_name,
+                group_participant_count=group_participant_count,
+            ),
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content=(
+                        f"Sesion creada para {clean_name}. "
+                        f"Canal WhatsApp vinculado con invocacion {trigger_word.strip()}."
+                    ),
+                )
+            ],
+        )
+        return repository.save(session)
+
     def get(self, session_id: str) -> Session:
         session = repository.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         return session
+
+    def healthcheck(self) -> None:
+        repository.healthcheck()
 
     def merge_extraction(
         self,
@@ -174,7 +238,7 @@ class SessionService:
         )
         return repository.save(session)
 
-    def remove_participant(self, session_id: str, name: str) -> Session:
+    def remove_participant(self, session_id: str, name: str, external_id: str | None = None) -> Session:
         session = self.get(session_id)
         before = len(session.participants)
         session.participants = [
@@ -187,10 +251,14 @@ class SessionService:
 
         refresh_schedule_state(session)
         session.messages.append(ChatMessage(role="assistant", content=f"Participante quitado: {name.strip()}."))
+        if external_id:
+            reply = f"Listo: quite a {name} de la sesion.\n\n{build_channel_reply(session)}"
+            add_command_receipt(session, external_id, "remove_participant", reply)
         return repository.save(session)
 
     def calculate(self, session_id: str) -> Session:
         session = self.get(session_id)
+        decision_is_confirmed = session.selected_option is not None and session.decision_summary is not None
         matrix = build_availability_matrix(session)
         session.availability_matrix = matrix
         session.options = options_from_matrix(matrix)
@@ -204,7 +272,7 @@ class SessionService:
                     content=f"Calculo listo. Mejor opcion: {best.day} {best.start}-{best.end} con {best.coverage_percent}% de cobertura.",
                 )
             )
-        session.status = "calculated"
+        session.status = "confirmed" if decision_is_confirmed else "calculated"
         return repository.save(session)
 
     def confirm(
@@ -213,13 +281,18 @@ class SessionService:
         option_id: str,
         confirmed_by: str = "admin",
         source: str = "panel",
+        external_id: str | None = None,
+        now: datetime | None = None,
     ) -> Session:
         session = self.get(session_id)
         option = find_option(session.options, option_id)
         if not option:
             raise HTTPException(status_code=400, detail="Option not found")
 
+        snapshot = create_calendar_event_snapshot(session, option, now)
         session.selected_option = option
+        session.selected_event_date = snapshot.start_at.split("T", 1)[0]
+        session.selected_calendar_event = snapshot
         session.decision_summary = build_summary(session, option)
         session.decision_history.append(
             DecisionRecord(
@@ -227,22 +300,48 @@ class SessionService:
                 summary=session.decision_summary,
                 confirmed_by=confirmed_by.strip() or "admin",
                 source=source if source in {"panel", "whatsapp", "api"} else "api",
+                event_date=session.selected_event_date,
+                calendar_event=snapshot.model_copy(deep=True),
+                external_id=external_id,
+                created_at=snapshot.dtstamp,
             )
         )
         session.messages.append(ChatMessage(role="assistant", content=session.decision_summary))
         session.insights = build_insights(session)
         session.status = "confirmed"
+        if external_id:
+            try:
+                document_text = build_calendar_ics(session)
+            except Exception:
+                document_text = None
+            add_command_receipt(
+                session,
+                external_id,
+                "confirm",
+                build_confirmed_channel_reply(session),
+                attachment_kind="calendar" if document_text else None,
+                document_text=document_text,
+            )
         return repository.save(session)
 
-    def cancel_decision(self, session_id: str) -> Session:
+    def cancel_decision(self, session_id: str, external_id: str | None = None) -> Session:
         session = self.get(session_id)
         if not session.selected_option and not session.decision_summary:
             raise HTTPException(status_code=400, detail="Session has no confirmed decision")
 
         session.selected_option = None
+        session.selected_event_date = None
+        session.selected_calendar_event = None
         session.decision_summary = None
         session.status = "calculated" if session.options else "draft"
         session.messages.append(ChatMessage(role="assistant", content="Decision cancelada. Puedes confirmar otra opcion."))
+        if external_id:
+            add_command_receipt(
+                session,
+                external_id,
+                "cancel",
+                build_cancelled_channel_reply(session),
+            )
         return repository.save(session)
 
     def archive(self, session_id: str) -> Session:
@@ -297,7 +396,13 @@ class SessionService:
         )
         return repository.save(session)
 
-    def add_channel_message(self, session_id: str, sender: str, text: str) -> tuple[Session, bool]:
+    def add_channel_message(
+        self,
+        session_id: str,
+        sender: str,
+        text: str,
+        external_id: str | None = None,
+    ) -> tuple[Session, bool]:
         session = self.get(session_id)
         invoked = should_invoke(session, text)
         session.channel_messages.append(
@@ -305,6 +410,7 @@ class SessionService:
                 sender=sender.strip(),
                 text=text.strip(),
                 detected_invocation=invoked,
+                external_id=external_id,
             )
         )
         return repository.save(session), invoked
@@ -326,12 +432,67 @@ class SessionService:
 
         return repository.save(session), invoked
 
-    def add_agent_channel_reply(self, session_id: str, reply: str) -> Session:
+    def add_agent_channel_reply(
+        self,
+        session_id: str,
+        reply: str,
+        *,
+        reply_to_external_id: str | None = None,
+        reply_format: str | None = None,
+        attachment_kind: str | None = None,
+    ) -> Session:
         session = self.get(session_id)
         session.last_agent_reply = reply
-        session.channel_messages.append(ChannelMessage(sender="Agente", text=reply, kind="agent"))
+        session.channel_messages.append(
+            ChannelMessage(
+                sender="Agente",
+                text=reply,
+                kind="agent",
+                reply_to_external_id=reply_to_external_id,
+                reply_format=reply_format,
+                attachment_kind=attachment_kind,
+            )
+        )
         session.messages.append(ChatMessage(role="assistant", content=reply, source="channel_simulator"))
         return repository.save(session)
+
+    def channel_message_by_external_id(self, session: Session, external_id: str | None) -> ChannelMessage | None:
+        if not external_id:
+            return None
+        return next(
+            (
+                message
+                for message in session.channel_messages
+                if message.kind == "human" and message.external_id == external_id
+            ),
+            None,
+        )
+
+    def agent_reply_for_external_id(self, session: Session, external_id: str) -> ChannelMessage | None:
+        return next(
+            (
+                message
+                for message in session.channel_messages
+                if message.kind == "agent" and message.reply_to_external_id == external_id
+            ),
+            None,
+        )
+
+    def decision_by_external_id(self, session: Session, external_id: str):
+        return next(
+            (record for record in reversed(session.decision_history) if record.external_id == external_id),
+            None,
+        )
+
+    def command_receipt_by_external_id(self, session: Session, external_id: str):
+        return next(
+            (
+                receipt
+                for receipt in reversed(session.channel_command_receipts)
+                if receipt.external_id == external_id
+            ),
+            None,
+        )
 
     def pending_channel_messages(self, session: Session) -> list[ChannelMessage]:
         last_agent_index = -1
@@ -348,6 +509,27 @@ class SessionService:
 
 def find_option(options: list[TimeOption], option_id: str) -> TimeOption | None:
     return next((option for option in options if option.id == option_id), None)
+
+
+def add_command_receipt(
+    session: Session,
+    external_id: str,
+    command_name: str,
+    reply: str,
+    *,
+    attachment_kind: str | None = None,
+    document_text: str | None = None,
+) -> None:
+    session.channel_command_receipts.append(
+        ChannelCommandReceipt(
+            external_id=external_id,
+            command_name=command_name,
+            reply=reply,
+            attachment_kind=attachment_kind,
+            document_text=document_text,
+        )
+    )
+    session.channel_command_receipts = session.channel_command_receipts[-1000:]
 
 
 def refresh_schedule_state(session: Session, *, clear_decision: bool = True) -> None:
@@ -367,6 +549,8 @@ def clear_stale_decision(session: Session) -> None:
         return
 
     session.selected_option = None
+    session.selected_event_date = None
+    session.selected_calendar_event = None
     session.decision_summary = None
     session.messages.append(
         ChatMessage(
@@ -581,7 +765,7 @@ def build_confirmed_channel_reply(session: Session, now: datetime | None = None)
         return f"{header}\n\nNo hay una opcion confirmada todavia."
 
     option = session.selected_option
-    event_date = option_event_date(option, now)
+    event_date = confirmed_event_date(session, now)
     lines = [
         header,
         "",
@@ -842,12 +1026,17 @@ def classify_channel_command(session: Session) -> dict | None:
     if re.search(r"\b(ayuda|help|comandos|instrucciones)\b", command_text):
         return {"name": "help"}
 
-    number_match = re.search(r"\b(?:opcion|alternativa)?\s*([1-3])\b", command_text)
+    number_token = re.search(r"(?<!\w)([+-]?\d+(?:[.,]\d+)?(?:ra|ro|ta|to)?)(?!\w)", command_text)
     if re.search(r"\b(confirmar|confirma|confirmo)\b", command_text) or (
-        re.search(r"\b(cerrar|cierra)\b", command_text) and number_match
+        re.search(r"\b(cerrar|cierra)\b", command_text) and number_token
     ):
-        option_index = int(number_match.group(1)) if number_match else 1
-        return {"name": "confirm", "option_index": option_index}
+        if not number_token:
+            return {"name": "confirm", "option_index": 1, "option_label": "1"}
+
+        option_label = number_token.group(1)
+        integer_match = re.fullmatch(r"([+-]?\d+)(?:ra|ro|ta|to)?", option_label)
+        option_index = int(integer_match.group(1)) if integer_match else 0
+        return {"name": "confirm", "option_index": option_index, "option_label": option_label}
 
     if re.search(r"\b(cancelar|cancela|cancelen|anular|anula|deshacer|deshaz)\b", command_text):
         return {"name": "cancel"}

@@ -1,4 +1,4 @@
-import type { ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
+import type { OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "coordina.basicAuth";
@@ -90,6 +90,12 @@ export function getSession(sessionId: string) {
 
 export function getRuntime() {
   return request<RuntimeInfo>("/api/runtime", {
+    method: "GET"
+  });
+}
+
+export function getOpsStatus() {
+  return request<OpsStatus>("/api/ops/status", {
     method: "GET"
   });
 }
@@ -214,6 +220,7 @@ export function sendChannelMessage(sessionId: string, sender: string, text: stri
     agent_reply: string | null;
     elapsed_ms: number;
     token_usage: TokenUsage | null;
+    duplicate: boolean;
   }>(
     `/api/sessions/${sessionId}/channel/messages`,
     {
@@ -231,6 +238,7 @@ export function sendChannelBatch(sessionId: string, messages: Array<{ sender: st
     agent_reply: string | null;
     elapsed_ms: number;
     token_usage: TokenUsage | null;
+    duplicate: boolean;
   }>(`/api/sessions/${sessionId}/channel/batch`, {
     method: "POST",
     body: JSON.stringify({ messages })

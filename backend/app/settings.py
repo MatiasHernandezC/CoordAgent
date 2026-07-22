@@ -65,6 +65,10 @@ class Settings:
     # Con "json" la app corre sin Postgres usando data/sessions.json.
     db_backend: str = os.getenv("DB_BACKEND", "postgres").strip().lower()
 
+    # Estado interno del puente WhatsApp (solo red Docker; no se publica).
+    gateway_status_url: str = os.getenv("GATEWAY_STATUS_URL", "http://gateway:8080/status")
+    gateway_status_timeout_seconds: float = env_float("GATEWAY_STATUS_TIMEOUT_SECONDS", 2.0)
+
     # Almacenamiento legacy (conservado por si necesitas rollback)
     data_file: Path = Path(os.getenv("DATA_FILE", "data/sessions.json"))
 

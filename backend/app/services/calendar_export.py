@@ -2,7 +2,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.schemas import Session, TimeOption
+from app.schemas import CalendarEventSnapshot, Session, TimeOption
 from app.settings import settings
 
 DAY_INDEX = {
@@ -77,9 +77,9 @@ def build_google_calendar_url(session: Session, now: datetime | None = None) -> 
     if option is None:
         return ""
 
-    tz_name = settings.app_timezone or "America/Santiago"
-    current = now_local(now)
-    start_at, end_at = event_datetimes(option, current, current.tzinfo)
+    snapshot = calendar_event_snapshot(session, now)
+    tz_name = snapshot.timezone
+    start_at, end_at = session_event_datetimes(session, now)
 
     available = ", ".join(option.available_participants) or "por confirmar"
     params = {
@@ -97,17 +97,16 @@ def build_calendar_ics(session: Session, now: datetime | None = None) -> str:
     if option is None:
         raise ValueError("La sesion no tiene una decision confirmada.")
 
-    tz_name = settings.app_timezone or "America/Santiago"
-    tz = load_timezone(tz_name)
-    now_local = now.astimezone(tz) if now else datetime.now(tz)
-    start_at, end_at = event_datetimes(option, now_local, tz)
+    snapshot = calendar_event_snapshot(session, now)
+    tz_name = snapshot.timezone
+    start_at, end_at = session_event_datetimes(session, now)
 
     available = ", ".join(option.available_participants) or "Sin participantes confirmados"
     unavailable = ", ".join(option.unavailable_participants) or "Sin conflictos registrados"
     description = (
-        f"Decision confirmada por Coordina.\\n"
-        f"Asisten: {available}.\\n"
-        f"No calzan: {unavailable}.\\n"
+        f"Decision confirmada por Coordina.\n"
+        f"Asisten: {available}.\n"
+        f"No calzan: {unavailable}.\n"
         f"Cobertura: {option.coverage_percent}%."
     )
 
@@ -118,8 +117,8 @@ def build_calendar_ics(session: Session, now: datetime | None = None) -> str:
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "BEGIN:VEVENT",
-        f"UID:{escape_text(session.id)}-{escape_text(option.id)}@coordina",
-        f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        f"UID:{escape_text(snapshot.uid)}",
+        f"DTSTAMP:{parse_datetime(snapshot.dtstamp).astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
         f"DTSTART;TZID={tz_name}:{start_at.strftime('%Y%m%dT%H%M%S')}",
         f"DTEND;TZID={tz_name}:{end_at.strftime('%Y%m%dT%H%M%S')}",
         f"SUMMARY:{escape_text(session.channel_config.group_name or session.title)}",
@@ -128,6 +127,96 @@ def build_calendar_ics(session: Session, now: datetime | None = None) -> str:
         "END:VCALENDAR",
     ]
     return "\r\n".join(fold_ics_line(line) for line in lines) + "\r\n"
+
+
+def confirmed_event_date(session: Session, now: datetime | None = None) -> date:
+    """Devuelve la fecha fijada al confirmar, con fallback para sesiones antiguas."""
+    snapshot = calendar_event_snapshot(session, now)
+    return parse_datetime(snapshot.start_at).date()
+
+
+def calendar_event_snapshot(session: Session, now: datetime | None = None) -> CalendarEventSnapshot:
+    """Resuelve un snapshot persistido; migra sesiones antiguas de forma estable."""
+    if session.selected_calendar_event:
+        return session.selected_calendar_event
+
+    for record in reversed(session.decision_history):
+        if record.calendar_event:
+            return record.calendar_event
+
+    if session.selected_option is None:
+        raise ValueError("La sesion no tiene una decision confirmada.")
+
+    option = session.selected_option
+    anchor = now_local(now)
+    dtstamp = datetime.now(timezone.utc)
+    if session.decision_history:
+        try:
+            dtstamp = parse_datetime(session.decision_history[-1].created_at).astimezone(timezone.utc)
+            anchor = now_local(dtstamp)
+        except ValueError:
+            pass
+
+    tz_name = settings.app_timezone or "America/Santiago"
+    tz = load_timezone(tz_name)
+
+    if session.selected_event_date:
+        try:
+            event_date = date.fromisoformat(session.selected_event_date)
+            start_at = datetime.combine(event_date, parse_clock(option.start), tzinfo=tz)
+            end_at = datetime.combine(event_date, parse_clock(option.end), tzinfo=tz)
+            if end_at <= start_at:
+                end_at += timedelta(days=1)
+            return CalendarEventSnapshot(
+                uid=f"{session.id}-{option.id}@coordina",
+                start_at=start_at.isoformat(),
+                end_at=end_at.isoformat(),
+                timezone=tz_name,
+                dtstamp=dtstamp.isoformat(),
+            )
+        except ValueError:
+            pass
+
+    start_at, end_at = event_datetimes(option, anchor, tz)
+    return CalendarEventSnapshot(
+        uid=f"{session.id}-{option.id}@coordina",
+        start_at=start_at.isoformat(),
+        end_at=end_at.isoformat(),
+        timezone=tz_name,
+        dtstamp=dtstamp.isoformat(),
+    )
+
+
+def create_calendar_event_snapshot(
+    session: Session,
+    option: TimeOption,
+    now: datetime | None = None,
+) -> CalendarEventSnapshot:
+    tz_name = settings.app_timezone or "America/Santiago"
+    tz = load_timezone(tz_name)
+    current = now_local(now)
+    start_at, end_at = event_datetimes(option, current, tz)
+    dtstamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return CalendarEventSnapshot(
+        uid=f"{session.id}-{option.id}@coordina",
+        start_at=start_at.isoformat(),
+        end_at=end_at.isoformat(),
+        timezone=tz_name,
+        dtstamp=dtstamp.isoformat(),
+    )
+
+
+def session_event_datetimes(session: Session, now: datetime | None = None) -> tuple[datetime, datetime]:
+    snapshot = calendar_event_snapshot(session, now)
+    tz = load_timezone(snapshot.timezone)
+    return (
+        parse_datetime(snapshot.start_at).astimezone(tz),
+        parse_datetime(snapshot.end_at).astimezone(tz),
+    )
+
+
+def parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def event_datetimes(option: TimeOption, now_local: datetime, tz: tzinfo) -> tuple[datetime, datetime]:
@@ -175,12 +264,19 @@ def escape_text(value: str) -> str:
 
 
 def fold_ics_line(line: str, limit: int = 75) -> str:
-    if len(line) <= limit:
-        return line
+    """Pliega por octetos UTF-8, como exige RFC 5545 (no por caracteres)."""
+    chunks: list[str] = []
+    current = ""
 
-    chunks = [line[:limit]]
-    rest = line[limit:]
-    while rest:
-        chunks.append(" " + rest[: limit - 1])
-        rest = rest[limit - 1 :]
+    for char in line:
+        if len((current + char).encode("utf-8")) <= limit:
+            current += char
+            continue
+
+        if current:
+            chunks.append(current)
+        current = " " + char
+
+    if current or not chunks:
+        chunks.append(current)
     return "\r\n".join(chunks)

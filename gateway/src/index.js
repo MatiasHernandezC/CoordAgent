@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 
 import makeWASocket, {
@@ -10,14 +11,18 @@ import makeWASocket, {
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 
+import { sendAgentReply } from "./delivery.js";
+import { PersistentQueue } from "./persistent_queue.js";
+
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://backend:8000";
 const TRIGGER_WORD = process.env.TRIGGER_WORD ?? "@coordina";
 const AUTH_DIR = process.env.WA_AUTH_DIR ?? "/data/wa-auth";
 const MAP_FILE = join(AUTH_DIR, "group-sessions.json");
+const PENDING_FILE = join(AUTH_DIR, "pending-messages.json");
 
 const MAX_SENDER = envInt("MAX_SENDER", 80);
 const MAX_TEXT = envInt("MAX_TEXT", 500);
-const API_TIMEOUT_MS = envInt("API_TIMEOUT_MS", 30000);
+const API_TIMEOUT_MS = envInt("API_TIMEOUT_MS", 75000);
 const CONNECT_TIMEOUT_MS = envInt("WA_CONNECT_TIMEOUT_MS", 60000);
 const KEEP_ALIVE_MS = envInt("WA_KEEP_ALIVE_MS", 30000);
 const RECONNECT_MIN_MS = envInt("WA_RECONNECT_MIN_MS", 2000);
@@ -25,17 +30,32 @@ const RECONNECT_MAX_MS = envInt("WA_RECONNECT_MAX_MS", 60000);
 const GROUP_SYNC_INTERVAL_MS = envInt("WA_GROUP_SYNC_INTERVAL_MS", 300000);
 const HEARTBEAT_INTERVAL_MS = envInt("GATEWAY_HEARTBEAT_INTERVAL_MS", 600000);
 const RECENT_MESSAGE_LIMIT = envInt("RECENT_MESSAGE_LIMIT", 500);
+const MAX_PENDING_MESSAGES = envInt("MAX_PENDING_MESSAGES", 500);
+const PENDING_RETRY_MIN_MS = envInt("PENDING_RETRY_MIN_MS", 2000);
+const PENDING_RETRY_MAX_MS = envInt("PENDING_RETRY_MAX_MS", 300000);
+const MAX_PENDING_ATTEMPTS = envInt("MAX_PENDING_ATTEMPTS", 12);
 const FIRE_INIT_QUERIES = envBool("WA_FIRE_INIT_QUERIES", false);
+const HEALTH_PORT = envInt("HEALTH_PORT", 8080);
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
+const pendingQueue = new PersistentQueue(PENDING_FILE, MAX_PENDING_MESSAGES);
 
 let groupSessions = loadGroupSessions();
+const groupSessionPromises = new Map();
 let currentSock = null;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let starting = false;
 let shuttingDown = false;
 let lastGroupSyncAt = 0;
+let connectionState = "starting";
+let lastConnectedAt = null;
+let lastDisconnectedAt = null;
+let lastConnectionReason = null;
+let drainingPending = false;
+let pendingDrainTimer = null;
+let queueOverflowCount = 0;
+let lastQueueErrorAt = null;
 const recentMessageIds = new Set();
 
 function envInt(name, fallback) {
@@ -58,14 +78,23 @@ function loadGroupSessions() {
       return parsed && typeof parsed === "object" ? parsed : {};
     }
   } catch (err) {
-    logger.warn({ err: String(err) }, "no se pudo leer el mapa de sesiones, empiezo vacio");
+    const preserved = `${MAP_FILE}.corrupt-${Date.now()}`;
+    try {
+      renameSync(MAP_FILE, preserved);
+    } catch {
+      // Si ni siquiera se puede preservar, el create-or-get del backend sigue
+      // evitando sesiones duplicadas cuando llegue el siguiente mensaje.
+    }
+    logger.warn({ err: String(err), preserved }, "mapa de sesiones invalido; se preservo para diagnostico");
   }
   return {};
 }
 
 function saveGroupSessions(map) {
   mkdirSync(dirname(MAP_FILE), { recursive: true });
-  writeFileSync(MAP_FILE, JSON.stringify(map, null, 2));
+  const temp = `${MAP_FILE}.tmp`;
+  writeFileSync(temp, JSON.stringify(map, null, 2), { encoding: "utf8", mode: 0o600 });
+  renameSync(temp, MAP_FILE);
 }
 
 function sessionIdFromEntry(entry) {
@@ -116,7 +145,9 @@ async function api(path, options = {}) {
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(`Backend ${path} respondio ${response.status}: ${detail.slice(0, 200)}`);
+      const error = new Error(`Backend ${path} respondio ${response.status}: ${detail.slice(0, 200)}`);
+      error.status = response.status;
+      throw error;
     }
     return response.json();
   } catch (err) {
@@ -143,6 +174,19 @@ async function configureBackendChannel(sessionId, groupJid, metadata) {
 }
 
 async function sessionForGroup(sock, groupJid) {
+  const inFlight = groupSessionPromises.get(groupJid);
+  if (inFlight) return inFlight;
+
+  const promise = sessionForGroupUnlocked(sock, groupJid).finally(() => {
+    if (groupSessionPromises.get(groupJid) === promise) {
+      groupSessionPromises.delete(groupJid);
+    }
+  });
+  groupSessionPromises.set(groupJid, promise);
+  return promise;
+}
+
+async function sessionForGroupUnlocked(sock, groupJid) {
   const existing = groupSessions[groupJid];
   const existingSessionId = sessionIdFromEntry(existing);
   if (existingSessionId) {
@@ -157,11 +201,15 @@ async function sessionForGroup(sock, groupJid) {
   }
 
   const metadata = await readGroupMetadata(sock, groupJid);
-  const { session } = await api("/api/sessions", {
+  const { session } = await api("/api/channel/groups/resolve", {
     method: "POST",
-    body: JSON.stringify({ title: `WhatsApp - ${metadata.groupName}` })
+    body: JSON.stringify({
+      group_jid: groupJid,
+      group_name: metadata.groupName,
+      group_participant_count: metadata.participantCount,
+      trigger_word: TRIGGER_WORD
+    })
   });
-  await configureBackendChannel(session.id, groupJid, metadata);
 
   groupSessions[groupJid] = mapEntry(session.id, groupJid, metadata);
   saveGroupSessions(groupSessions);
@@ -227,6 +275,7 @@ function rememberMessage(messageId) {
 async function start() {
   if (starting || shuttingDown) return;
   starting = true;
+  connectionState = "connecting";
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -264,8 +313,12 @@ function handleConnectionUpdate(sock, update) {
 
   if (connection === "open") {
     reconnectAttempt = 0;
+    connectionState = "connected";
+    lastConnectedAt = new Date().toISOString();
+    lastConnectionReason = null;
     logger.info("Gateway conectado a WhatsApp. Escuchando grupos.");
     syncKnownGroups(sock).catch((err) => logger.error({ err: String(err) }, "fallo sincronizando grupos conocidos"));
+    drainPendingMessages(sock).catch((err) => logger.error({ err: String(err) }, "fallo drenando cola pendiente"));
   }
 
   if (connection === "close") {
@@ -274,12 +327,16 @@ function handleConnectionUpdate(sock, update) {
     const statusCode = lastDisconnect?.error?.output?.statusCode;
     const loggedOut = statusCode === DisconnectReason.loggedOut;
     currentSock = null;
+    lastDisconnectedAt = new Date().toISOString();
+    lastConnectionReason = `status=${statusCode ?? "desconocido"}`;
 
     if (loggedOut) {
+      connectionState = "logged_out";
       logger.error("Sesion cerrada por WhatsApp. Borra el volumen wa-auth y vuelve a escanear el QR.");
       return;
     }
 
+    connectionState = "reconnecting";
     scheduleReconnect(`conexion cerrada por WhatsApp, status=${statusCode ?? "desconocido"}`);
   }
 }
@@ -294,7 +351,7 @@ async function handleMessages(sock, { messages, type }) {
       if (message.key.fromMe) continue;
 
       const messageId = messageIdOf(message);
-      if (rememberMessage(messageId)) {
+      if (recentMessageIds.has(messageId) || pendingQueue.has(messageId)) {
         logger.debug({ jid, messageId }, "mensaje duplicado ignorado");
         continue;
       }
@@ -303,20 +360,120 @@ async function handleMessages(sock, { messages, type }) {
       if (!text) continue;
 
       const sender = cleanLabel(message.pushName || message.key.participant || "Participante", "Participante", MAX_SENDER);
-      const sessionId = await sessionForGroup(sock, jid);
-
-      const result = await api(`/api/sessions/${sessionId}/channel/messages`, {
-        method: "POST",
-        body: JSON.stringify({ sender, text })
-      });
-
-      if (result.invoked) {
-        await sendAgentReply(sock, jid, result);
+      try {
+        pendingQueue.enqueue({
+          id: messageId,
+          jid,
+          sender,
+          text,
+          primarySent: false,
+          documentSent: false
+        });
+      } catch (err) {
+        queueOverflowCount += 1;
+        lastQueueErrorAt = new Date().toISOString();
+        throw err;
       }
+      logger.debug({ jid, messageId, pendingMessages: pendingQueue.size }, "mensaje guardado en cola persistente");
     } catch (err) {
       logger.error({ err: String(err) }, "error procesando un mensaje del grupo");
     }
   }
+
+  await drainPendingMessages(sock);
+}
+
+async function drainPendingMessages(sock) {
+  if (drainingPending || shuttingDown || sock !== currentSock || connectionState !== "connected") return;
+  drainingPending = true;
+  if (pendingDrainTimer) {
+    clearTimeout(pendingDrainTimer);
+    pendingDrainTimer = null;
+  }
+
+  try {
+    while (!shuttingDown && sock === currentSock && connectionState === "connected") {
+      const item = pendingQueue.nextReady();
+      if (!item) break;
+
+      try {
+        await processPendingMessage(sock, item);
+      } catch (err) {
+        const status = Number(err?.status) || null;
+        const permanentHttpError =
+          status !== null && status >= 400 && status < 500 && ![408, 409, 425, 429].includes(status);
+        if (permanentHttpError || item.attempts + 1 >= MAX_PENDING_ATTEMPTS) {
+          pendingQueue.moveToDeadLetter(item.id, err);
+          lastQueueErrorAt = new Date().toISOString();
+          logger.error(
+            { err: String(err), status, jid: item.jid, messageId: item.id, attempts: item.attempts + 1 },
+            "mensaje movido a dead letter"
+          );
+          continue;
+        }
+
+        const failed = pendingQueue.markFailed(
+          item.id,
+          err,
+          PENDING_RETRY_MIN_MS,
+          PENDING_RETRY_MAX_MS
+        );
+        logger.error(
+          {
+            err: String(err),
+            jid: item.jid,
+            messageId: item.id,
+            attempts: failed?.attempts,
+            retryInMs: failed?.delayMs
+          },
+          "mensaje conservado para reintento"
+        );
+        continue;
+      }
+
+      pendingQueue.remove(item.id);
+      rememberMessage(item.id);
+      logger.info({ jid: item.jid, messageId: item.id }, "mensaje procesado y retirado de la cola");
+    }
+  } finally {
+    drainingPending = false;
+    schedulePendingDrain(sock);
+  }
+}
+
+async function processPendingMessage(sock, item) {
+  const sessionId = await sessionForGroup(sock, item.jid);
+  const result = await api(`/api/sessions/${sessionId}/channel/messages`, {
+    method: "POST",
+    body: JSON.stringify({ sender: item.sender, text: item.text, message_id: item.id })
+  });
+
+  if (result.invoked) {
+    if (sock !== currentSock || connectionState !== "connected") {
+      throw new Error("WhatsApp se desconecto antes de entregar la respuesta");
+    }
+    await sendAgentReply({
+      sock,
+      jid: item.jid,
+      result,
+      pendingItem: item,
+      markProgress: (progress) => pendingQueue.markProgress(item.id, progress),
+      logger
+    });
+  }
+}
+
+function schedulePendingDrain(sock) {
+  if (pendingDrainTimer || pendingQueue.size === 0 || shuttingDown) return;
+  if (sock !== currentSock || connectionState !== "connected") return;
+
+  const delayMs = pendingQueue.millisecondsUntilNext();
+  if (delayMs === null) return;
+  pendingDrainTimer = setTimeout(() => {
+    pendingDrainTimer = null;
+    drainPendingMessages(sock).catch((err) => logger.error({ err: String(err) }, "fallo reintentando cola"));
+  }, Math.max(50, delayMs));
+  pendingDrainTimer.unref();
 }
 
 async function handleGroupParticipants(sock, event) {
@@ -355,38 +512,11 @@ function buildWelcomeMessage() {
   ].join("\n");
 }
 
-async function sendAgentReply(sock, jid, result) {
-  if (result.agent_reply_image) {
-    const caption = result.agent_reply_caption || result.agent_reply || "";
-    await sock.sendMessage(jid, {
-      image: Buffer.from(result.agent_reply_image, "base64"),
-      caption
-    });
-    logger.info({ jid, format: result.agent_reply_format }, "respuesta con imagen enviada al grupo");
-  } else if (result.agent_reply) {
-    await sock.sendMessage(jid, { text: result.agent_reply });
-    logger.info({ jid, format: result.agent_reply_format }, "respuesta de texto enviada al grupo");
-  }
-
-  // Documento adjunto (ej. evento .ics al confirmar). Es opcional: si falla el
-  // envio, la respuesta de texto ya salio y la coordinacion no se pierde.
-  if (result.agent_reply_document && result.agent_reply_document_name) {
-    try {
-      await sock.sendMessage(jid, {
-        document: Buffer.from(result.agent_reply_document, "base64"),
-        fileName: result.agent_reply_document_name,
-        mimetype: result.agent_reply_document_mimetype || "application/octet-stream"
-      });
-      logger.info({ jid, fileName: result.agent_reply_document_name }, "documento enviado al grupo");
-    } catch (err) {
-      logger.error({ jid, err: String(err) }, "no se pudo enviar el documento al grupo");
-    }
-  }
-}
-
 function scheduleReconnect(reason) {
   if (shuttingDown || reconnectTimer) return;
 
+  connectionState = "reconnecting";
+  lastConnectionReason = reason;
   const delayMs = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** reconnectAttempt);
   reconnectAttempt += 1;
   logger.warn({ reason, delayMs, reconnectAttempt }, "conexion cerrada, reconexion programada");
@@ -410,18 +540,74 @@ function closeCurrentSocket() {
   }
 }
 
+function gatewayStatus() {
+  return {
+    ok: connectionState === "connected",
+    state: connectionState,
+    connected: connectionState === "connected",
+    starting,
+    reconnectAttempt,
+    knownGroups: Object.keys(groupSessions).length,
+    recentMessageIds: recentMessageIds.size,
+    pendingMessages: pendingQueue.size,
+    deadLetterMessages: pendingQueue.deadLetterSize,
+    queueOverflowCount,
+    lastQueueErrorAt,
+    lastConnectedAt,
+    lastDisconnectedAt,
+    lastConnectionReason,
+    uptimeSeconds: Math.floor(process.uptime())
+  };
+}
+
+const healthServer = createServer((request, response) => {
+  const status = gatewayStatus();
+  const path = request.url?.split("?", 1)[0] ?? "/";
+  const live = !shuttingDown;
+  const ready = status.connected;
+
+  let statusCode = 404;
+  let payload = { ok: false, detail: "not found" };
+  if (request.method === "GET" && path === "/livez") {
+    statusCode = live ? 200 : 503;
+    payload = { ...status, ok: live };
+  } else if (request.method === "GET" && path === "/readyz") {
+    statusCode = ready ? 200 : 503;
+    payload = status;
+  } else if (request.method === "GET" && path === "/status") {
+    statusCode = 200;
+    payload = status;
+  }
+
+  response.writeHead(statusCode, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  response.end(JSON.stringify(payload));
+});
+
+healthServer.on("error", (err) => {
+  logger.fatal({ err: String(err), port: HEALTH_PORT }, "no se pudo iniciar el endpoint de salud");
+  process.exit(1);
+});
+
+healthServer.listen(HEALTH_PORT, "0.0.0.0", () => {
+  logger.info({ port: HEALTH_PORT }, "endpoint interno de salud disponible");
+});
+
 process.on("SIGTERM", () => {
   shuttingDown = true;
+  connectionState = "stopping";
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (pendingDrainTimer) clearTimeout(pendingDrainTimer);
   closeCurrentSocket();
-  process.exit(0);
+  healthServer.close(() => process.exit(0));
 });
 
 process.on("SIGINT", () => {
   shuttingDown = true;
+  connectionState = "stopping";
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (pendingDrainTimer) clearTimeout(pendingDrainTimer);
   closeCurrentSocket();
-  process.exit(0);
+  healthServer.close(() => process.exit(0));
 });
 
 process.on("unhandledRejection", (err) => {
@@ -436,9 +622,13 @@ process.on("uncaughtException", (err) => {
 setInterval(() => {
   logger.info(
     {
-      connected: Boolean(currentSock),
+      connected: connectionState === "connected",
+      state: connectionState,
       knownGroups: Object.keys(groupSessions).length,
-      recentMessageIds: recentMessageIds.size
+      recentMessageIds: recentMessageIds.size,
+      pendingMessages: pendingQueue.size,
+      deadLetterMessages: pendingQueue.deadLetterSize,
+      queueOverflowCount
     },
     "heartbeat gateway"
   );

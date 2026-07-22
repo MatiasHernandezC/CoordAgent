@@ -11,6 +11,7 @@ import {
   exportSession,
   exportSessionCsv,
   getSavedAuth,
+  getOpsStatus,
   getRuntime,
   listSessions,
   removeParticipant,
@@ -23,7 +24,7 @@ import {
 } from "./api";
 import { CHANNEL_EXAMPLE } from "./constants";
 import { getErrorMessage } from "./format";
-import type { Day, ReplyFormat, RuntimeInfo, Session } from "./types";
+import type { Day, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
 const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
 const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
@@ -46,6 +47,7 @@ export function App() {
   const [loginUser, setLoginUser] = useState("coordina");
   const [loginPassword, setLoginPassword] = useState("");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -82,6 +84,25 @@ export function App() {
   const confirmedSessionCount = sessions.filter((item) => getSessionQuality(item).tone === "confirmed").length;
   const archivedSessionCount = sessions.filter((item) => item.archived_at).length;
   const latestMessageCount = session?.channel_messages.length ?? 0;
+  const gateway = opsStatus?.gateway ?? null;
+  const botMetricValue = gateway?.connected
+    ? "Vinculado"
+    : gateway?.state === "logged_out"
+      ? "Desvinculado"
+      : gateway
+        ? "Sin conexion"
+        : "Revisando";
+  const botMetricDetail = gateway?.connected
+    ? gateway.dead_letter_messages || gateway.queue_overflow_count
+      ? `Cola requiere revision: ${gateway.dead_letter_messages ?? 0} aislado(s)`
+      : `${BOT_PHONE_DISPLAY} - ${gateway.known_groups ?? 0} grupo(s), ${gateway.pending_messages ?? 0} pendiente(s)`
+    : gateway?.state === "reconnecting"
+      ? `Reconectando (intento ${gateway.reconnect_attempt ?? 0})`
+      : gateway?.state === "logged_out"
+        ? "Requiere volver a vincular WhatsApp"
+        : gateway
+          ? `Estado: ${gateway.state}`
+          : BOT_PHONE_DISPLAY;
   const bestOption = session?.options[0] ?? null;
   const confirmedOption = session?.selected_option ?? null;
   const lastProcessing = session?.last_processing ?? null;
@@ -117,7 +138,9 @@ export function App() {
       .then((info) => {
         setRuntime(info);
         setAuthState("authenticated");
-        refreshSessions(undefined, { quiet: true }).catch((err) => setError(getErrorMessage(err)));
+        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus()]).catch((err) =>
+          setError(getErrorMessage(err))
+        );
       })
       .catch(() => {
         clearAuth();
@@ -129,7 +152,9 @@ export function App() {
     if (authState !== "authenticated" || !autoRefresh) return;
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      refreshSessions(session?.id, { quiet: true }).catch((err) => setError(getErrorMessage(err)));
+      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus()]).catch((err) =>
+        setError(getErrorMessage(err))
+      );
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(intervalId);
   }, [authState, autoRefresh, session?.id]);
@@ -165,6 +190,11 @@ export function App() {
     }
   }
 
+  async function refreshOpsStatus() {
+    const response = await getOpsStatus();
+    setOpsStatus(response);
+  }
+
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     const credentials: AuthCredentials = {
@@ -177,13 +207,14 @@ export function App() {
       saveAuth(credentials);
       setRuntime(info);
       setAuthState("authenticated");
-      await refreshSessions(undefined, { quiet: true });
+      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus()]);
     });
   }
 
   function handleLogout() {
     clearAuth();
     setRuntime(null);
+    setOpsStatus(null);
     setSession(null);
     setSessions([]);
     setLoginPassword("");
@@ -192,9 +223,8 @@ export function App() {
 
   async function handleRefreshAll() {
     await runAction("Actualizando panel...", async () => {
-      const info = await getRuntime();
+      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus()]);
       setRuntime(info);
-      await refreshSessions();
     });
   }
 
@@ -403,7 +433,18 @@ export function App() {
       {busyLabel ? <div className="notice active">{busyLabel}</div> : null}
 
       <section className="metrics-row" aria-label="Estado del sistema">
-        <Metric label="Bot" value="Vinculado" detail={BOT_PHONE_DISPLAY} tone="ok" />
+        <Metric
+          label="Bot"
+          value={botMetricValue}
+          detail={botMetricDetail}
+          tone={
+            gateway?.connected && !gateway.dead_letter_messages && !gateway.queue_overflow_count
+              ? "ok"
+              : gateway
+                ? "warn"
+                : "neutral"
+          }
+        />
         <Metric label="Abiertas" value={String(openSessionCount)} detail={`${archivedSessionCount} archivadas`} tone="ok" />
         <Metric label="Revision" value={String(reviewSessionCount)} detail={`${readySessionCount} listas`} tone={reviewSessionCount ? "warn" : "ok"} />
         <Metric label="Mensajes" value={String(latestMessageCount)} detail="sesion activa" tone="neutral" />

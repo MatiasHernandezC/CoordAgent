@@ -328,7 +328,7 @@ El gateway usa un supervisor liviano sobre Baileys:
 Variables opcionales:
 
 ```txt
-API_TIMEOUT_MS=30000
+API_TIMEOUT_MS=75000
 WA_CONNECT_TIMEOUT_MS=60000
 WA_KEEP_ALIVE_MS=30000
 WA_RECONNECT_MIN_MS=2000

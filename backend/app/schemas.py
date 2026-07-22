@@ -67,12 +67,23 @@ class ProcessingSummary(BaseModel):
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+class CalendarEventSnapshot(BaseModel):
+    uid: str
+    start_at: str
+    end_at: str
+    timezone: str
+    dtstamp: str
+
+
 class DecisionRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     option: TimeOption
     summary: str
     confirmed_by: str = "admin"
     source: Literal["panel", "whatsapp", "api"] = "panel"
+    event_date: str | None = None
+    calendar_event: CalendarEventSnapshot | None = None
+    external_id: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -111,6 +122,22 @@ class ChannelMessage(BaseModel):
     text: str
     kind: Literal["human", "agent"] = "human"
     detected_invocation: bool = False
+    # ID estable del mensaje de WhatsApp. Permite reintentos sin insertar ni
+    # procesar dos veces la misma entrada.
+    external_id: str | None = None
+    reply_to_external_id: str | None = None
+    reply_format: ReplyFormat | None = None
+    attachment_kind: Literal["calendar"] | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ChannelCommandReceipt(BaseModel):
+    external_id: str
+    command_name: str
+    reply: str
+    reply_format: ReplyFormat = "text"
+    attachment_kind: Literal["calendar"] | None = None
+    document_text: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -128,9 +155,14 @@ class Session(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
     channel_config: ChannelConfig = Field(default_factory=ChannelConfig)
     channel_messages: list[ChannelMessage] = Field(default_factory=list)
+    channel_command_receipts: list[ChannelCommandReceipt] = Field(default_factory=list)
     last_processing: ProcessingSummary | None = None
     last_agent_reply: str | None = None
     selected_option: TimeOption | None = None
+    # Fecha calendario fijada al confirmar. Evita que un .ics descargado mas
+    # tarde se mueva silenciosamente a la semana siguiente.
+    selected_event_date: str | None = None
+    selected_calendar_event: CalendarEventSnapshot | None = None
     decision_summary: str | None = None
     decision_history: list[DecisionRecord] = Field(default_factory=list)
     archived_at: str | None = None
@@ -215,9 +247,17 @@ class ChannelConfigRequest(BaseModel):
     group_participant_count: int | None = Field(default=None, ge=0, le=2048)
 
 
+class ResolveChannelGroupRequest(BaseModel):
+    group_jid: str = Field(min_length=6, max_length=120)
+    group_name: str = Field(default="grupo de WhatsApp", min_length=1, max_length=120)
+    group_participant_count: int | None = Field(default=None, ge=0, le=2048)
+    trigger_word: str = Field(default="@coordina", min_length=2, max_length=40)
+
+
 class ChannelMessageRequest(BaseModel):
     sender: str = Field(min_length=1, max_length=80)
     text: str = Field(min_length=1, max_length=500)
+    message_id: str | None = Field(default=None, min_length=1, max_length=240)
 
 
 class ChannelBatchRequest(BaseModel):
@@ -238,6 +278,7 @@ class ChannelMessageResponse(BaseModel):
     agent_reply_document_mimetype: str | None = None
     elapsed_ms: int = 0
     token_usage: TokenUsage | None = None
+    duplicate: bool = False
 
 
 class RuntimeInfo(BaseModel):

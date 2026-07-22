@@ -1,11 +1,12 @@
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.bff.routes import router
 from app.settings import settings
+from app.services.session_service import session_service
 
 logger = logging.getLogger("app")
 
@@ -30,6 +31,20 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 @app.get("/health")
 def health():
     return {"ok": True, "service": "coordinador-simple-mvp"}
+
+
+@app.get("/ready")
+def readiness():
+    try:
+        session_service.healthcheck()
+    except Exception as exc:
+        logger.warning("Readiness fallo: %s", exc)
+        raise HTTPException(status_code=503, detail="Storage unavailable") from exc
+    return {
+        "ok": True,
+        "service": "coordinador-simple-mvp",
+        "storage": settings.db_backend,
+    }
 
 
 app.include_router(router, prefix="/api")

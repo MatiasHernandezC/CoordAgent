@@ -16,12 +16,14 @@ from app.schemas import (
     MessageRequest,
     MessageResponse,
     RuntimeInfo,
+    ResolveChannelGroupRequest,
     TimeSlot,
 )
 from app.settings import settings
 from app.services.calendar_export import build_calendar_ics
 from app.services.image_render import render_availability_base64
 from app.services.llm_service import LlmUnavailableError, llm_service
+from app.services.ops_status import fetch_gateway_status
 from app.services.session_service import (
     build_cancelled_channel_reply,
     build_channel_caption,
@@ -60,10 +62,28 @@ def runtime_info():
     )
 
 
+@router.get("/ops/status")
+def operational_status():
+    gateway = fetch_gateway_status()
+    return {"ok": gateway["connected"], "gateway": gateway}
+
+
 @router.post("/sessions")
 def create_session(payload: CreateSessionRequest):
     session = session_service.create(payload.title)
     return {"session": session}
+
+
+@router.post("/channel/groups/resolve")
+def resolve_channel_group(payload: ResolveChannelGroupRequest):
+    with session_service.group_lock(payload.group_jid):
+        session = session_service.resolve_channel_group(
+            payload.group_jid,
+            payload.group_name,
+            payload.group_participant_count,
+            payload.trigger_word,
+        )
+        return {"session": session}
 
 
 @router.get("/sessions")
@@ -186,8 +206,46 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest):
 def add_channel_message(session_id: str, payload: ChannelMessageRequest):
     started = perf_counter()
     with session_service.session_lock(session_id):
-        session, invoked = session_service.add_channel_message(session_id, payload.sender, payload.text)
-        return invoke_channel_if_needed(session_id, session, invoked, started)
+        session = session_service.get(session_id)
+        existing = session_service.channel_message_by_external_id(session, payload.message_id)
+        if existing and payload.message_id:
+            saved_reply = session_service.agent_reply_for_external_id(session, payload.message_id)
+            saved_receipt = session_service.command_receipt_by_external_id(session, payload.message_id)
+            if saved_receipt:
+                return replay_command_receipt(
+                    session_id,
+                    session,
+                    saved_receipt,
+                    started,
+                    persist_reply=saved_reply is None,
+                )
+            if saved_reply:
+                return replay_channel_response(session, saved_reply, started)
+            saved_decision = session_service.decision_by_external_id(session, payload.message_id)
+            if saved_decision:
+                return recover_confirmed_response(session_id, session, payload.message_id, started)
+            return invoke_channel_if_needed(
+                session_id,
+                session,
+                existing.detected_invocation,
+                started,
+                external_id=payload.message_id,
+                duplicate=True,
+            )
+
+        session, invoked = session_service.add_channel_message(
+            session_id,
+            payload.sender,
+            payload.text,
+            external_id=payload.message_id,
+        )
+        return invoke_channel_if_needed(
+            session_id,
+            session,
+            invoked,
+            started,
+            external_id=payload.message_id,
+        )
 
 
 @router.post("/sessions/{session_id}/channel/batch", response_model=ChannelMessageResponse)
@@ -204,11 +262,24 @@ def invoke_channel_if_needed(
     session,
     invoked: bool,
     started: float,
+    external_id: str | None = None,
+    duplicate: bool = False,
 ) -> ChannelMessageResponse:
     if not invoked:
-        return ChannelMessageResponse(session=session, invoked=False, elapsed_ms=elapsed_ms(started))
+        return ChannelMessageResponse(
+            session=session,
+            invoked=False,
+            elapsed_ms=elapsed_ms(started),
+            duplicate=duplicate,
+        )
 
-    command_response = invoke_channel_command_if_needed(session_id, session, started)
+    command_response = invoke_channel_command_if_needed(
+        session_id,
+        session,
+        started,
+        external_id=external_id,
+        duplicate=duplicate,
+    )
     if command_response:
         return command_response
 
@@ -227,7 +298,6 @@ def invoke_channel_if_needed(
     )
     session = session_service.calculate(session_id)
     reply = build_channel_reply(session)
-    session = session_service.add_agent_channel_reply(session_id, reply)
 
     reply_format = resolve_reply_format(session)
     reply_image = None
@@ -241,6 +311,13 @@ def invoke_channel_if_needed(
             reply_image = None
             reply_caption = None
 
+    session = session_service.add_agent_channel_reply(
+        session_id,
+        reply,
+        reply_to_external_id=external_id,
+        reply_format=reply_format,
+    )
+
     return ChannelMessageResponse(
         session=session,
         invoked=True,
@@ -251,10 +328,18 @@ def invoke_channel_if_needed(
         agent_reply_format=reply_format,
         elapsed_ms=elapsed_ms(started),
         token_usage=token_usage,
+        duplicate=duplicate,
     )
 
 
-def invoke_channel_command_if_needed(session_id: str, session, started: float) -> ChannelMessageResponse | None:
+def invoke_channel_command_if_needed(
+    session_id: str,
+    session,
+    started: float,
+    *,
+    external_id: str | None = None,
+    duplicate: bool = False,
+) -> ChannelMessageResponse | None:
     command = classify_channel_command(session)
     if not command:
         return None
@@ -295,9 +380,10 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
 
         option_index = command["option_index"]
         if option_index < 1 or option_index > len(session.options):
+            option_label = command.get("option_label", option_index)
             reply = (
                 "*Coordina*\n\n"
-                f"No encuentro la opcion {option_index}. Pide *@coordina* para ver las opciones actuales."
+                f"No encuentro la opcion {option_label}. Pide *@coordina* para ver las opciones actuales."
             )
         else:
             option = session.options[option_index - 1]
@@ -306,6 +392,7 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
                 option.id,
                 confirmed_by=last_invoking_sender(session),
                 source="whatsapp",
+                external_id=external_id,
             )
             reply = build_confirmed_channel_reply(session)
             # Adjunta el evento .ics para que cada uno lo agregue a su calendario.
@@ -323,7 +410,7 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
 
     elif command_name == "cancel":
         try:
-            session = session_service.cancel_decision(session_id)
+            session = session_service.cancel_decision(session_id, external_id=external_id)
         except HTTPException:
             reply = (
                 "*Coordina*\n\n"
@@ -344,12 +431,29 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
     elif command_name == "summary":
         if session.participants:
             session = session_service.calculate(session_id)
-        reply = build_channel_reply(session)
+        if session.status == "confirmed" and session.selected_option:
+            reply = build_confirmed_channel_reply(session)
+            try:
+                ics_text = build_calendar_ics(session)
+                document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
+                safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
+                document_name = f"{safe_name}-evento.ics"
+                document_mimetype = "text/calendar"
+            except Exception:
+                document = None
+                document_name = None
+                document_mimetype = None
+        else:
+            reply = build_channel_reply(session)
 
     elif command_name == "remove_participant":
         participant_name = command["participant_name"]
         try:
-            session = session_service.remove_participant(session_id, participant_name)
+            session = session_service.remove_participant(
+                session_id,
+                participant_name,
+                external_id=external_id,
+            )
         except HTTPException:
             reply = (
                 "*Coordina*\n\n"
@@ -361,7 +465,13 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
     if not reply:
         return None
 
-    session = session_service.add_agent_channel_reply(session_id, reply)
+    session = session_service.add_agent_channel_reply(
+        session_id,
+        reply,
+        reply_to_external_id=external_id,
+        reply_format="text",
+        attachment_kind="calendar" if document else None,
+    )
     return ChannelMessageResponse(
         session=session,
         invoked=True,
@@ -373,6 +483,132 @@ def invoke_channel_command_if_needed(session_id: str, session, started: float) -
         agent_reply_document_mimetype=document_mimetype,
         elapsed_ms=elapsed_ms(started),
         token_usage=token_usage,
+        duplicate=duplicate,
+    )
+
+
+def replay_channel_response(session, saved_reply, started: float) -> ChannelMessageResponse:
+    """Reconstruye la entrega de un request ya procesado tras timeout/reinicio."""
+    reply_format = saved_reply.reply_format or "text"
+    reply_image = None
+    reply_caption = None
+    document = None
+    document_name = None
+    document_mimetype = None
+
+    if reply_format in {"image", "both"} and session.participants:
+        try:
+            reply_image = render_availability_base64(session)
+            reply_caption = build_channel_caption(session) if reply_format == "image" else saved_reply.text
+        except Exception:
+            reply_image = None
+            reply_caption = None
+
+    if saved_reply.attachment_kind == "calendar" and session.selected_option:
+        try:
+            ics_text = build_calendar_ics(session)
+            document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
+            safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
+            document_name = f"{safe_name}-evento.ics"
+            document_mimetype = "text/calendar"
+        except Exception:
+            document = None
+            document_name = None
+            document_mimetype = None
+
+    return ChannelMessageResponse(
+        session=session,
+        invoked=True,
+        llm_source="idempotent_replay",
+        agent_reply=saved_reply.text,
+        agent_reply_image=reply_image,
+        agent_reply_caption=reply_caption,
+        agent_reply_format=reply_format,
+        agent_reply_document=document,
+        agent_reply_document_name=document_name,
+        agent_reply_document_mimetype=document_mimetype,
+        elapsed_ms=elapsed_ms(started),
+        duplicate=True,
+    )
+
+
+def recover_confirmed_response(
+    session_id: str,
+    session,
+    external_id: str,
+    started: float,
+) -> ChannelMessageResponse:
+    """Cierra la ventana de crash entre guardar la decision y guardar su reply."""
+    reply = build_confirmed_channel_reply(session)
+    document = None
+    document_name = None
+    try:
+        ics_text = build_calendar_ics(session)
+        document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
+        safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
+        document_name = f"{safe_name}-evento.ics"
+    except Exception:
+        document = None
+        document_name = None
+
+    session = session_service.add_agent_channel_reply(
+        session_id,
+        reply,
+        reply_to_external_id=external_id,
+        reply_format="text",
+        attachment_kind="calendar" if document else None,
+    )
+    return ChannelMessageResponse(
+        session=session,
+        invoked=True,
+        llm_source="idempotent_recovery",
+        agent_reply=reply,
+        agent_reply_format="text",
+        agent_reply_document=document,
+        agent_reply_document_name=document_name,
+        agent_reply_document_mimetype="text/calendar" if document else None,
+        elapsed_ms=elapsed_ms(started),
+        duplicate=True,
+    )
+
+
+def replay_command_receipt(
+    session_id: str,
+    session,
+    receipt,
+    started: float,
+    *,
+    persist_reply: bool,
+) -> ChannelMessageResponse:
+    document = None
+    document_name = None
+    document_mimetype = None
+    if receipt.document_text:
+        document = base64.b64encode(receipt.document_text.encode("utf-8")).decode("ascii")
+        safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
+        document_name = f"{safe_name}-evento.ics"
+        document_mimetype = "text/calendar"
+
+    if persist_reply:
+        session = session_service.add_agent_channel_reply(
+            session_id,
+            receipt.reply,
+            reply_to_external_id=receipt.external_id,
+            reply_format=receipt.reply_format,
+            attachment_kind=receipt.attachment_kind,
+        )
+
+    return ChannelMessageResponse(
+        session=session,
+        invoked=True,
+        llm_source="idempotent_replay",
+        agent_reply=receipt.reply,
+        agent_reply_format=receipt.reply_format,
+        agent_reply_document=document,
+        agent_reply_document_name=document_name,
+        agent_reply_document_mimetype=document_mimetype,
+        elapsed_ms=elapsed_ms(started),
+        duplicate=True,
     )
 
 

@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16
@@ -12,6 +18,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
+    logging: *default-logging
     restart: unless-stopped
     # Sin "ports": la base solo es accesible dentro de la red de Docker.
 
@@ -31,9 +39,18 @@ services:
       LLM_CACHE_ENABLED: ${LLM_CACHE_ENABLED:-true}
       APP_TIMEZONE: ${APP_TIMEZONE:-America/Santiago}
       CORS_ORIGINS: ${PUBLIC_URL:-http://localhost}
+      GATEWAY_STATUS_URL: http://gateway:8080/status
+      GATEWAY_STATUS_TIMEOUT_SECONDS: ${GATEWAY_STATUS_TIMEOUT_SECONDS:-2}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
     restart: unless-stopped
     # Sin "ports": Caddy lo publica bajo /api.
 
@@ -44,6 +61,13 @@ services:
         # Mismo dominio que sirve Caddy: las llamadas /api quedan en el mismo origen.
         VITE_API_URL: ${PUBLIC_URL:-http://localhost}
         VITE_BOT_PHONE_NUMBER: ${BOT_PHONE_NUMBER:-+56 9 3527 1985}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
     restart: unless-stopped
     # Sin "ports": Caddy lo publica en la raiz.
 
@@ -55,7 +79,8 @@ services:
       WA_AUTH_DIR: /data/wa-auth
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Tuning opcional del supervisor (documentado en docs/DESPLIEGUE_WHATSAPP.md).
-      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-30000}
+      # Debe superar GEMINI_TIMEOUT_SECONDS (45s) mas el procesamiento local.
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-75000}
       WA_CONNECT_TIMEOUT_MS: ${WA_CONNECT_TIMEOUT_MS:-60000}
       WA_KEEP_ALIVE_MS: ${WA_KEEP_ALIVE_MS:-30000}
       WA_RECONNECT_MIN_MS: ${WA_RECONNECT_MIN_MS:-2000}
@@ -64,10 +89,25 @@ services:
       WA_FIRE_INIT_QUERIES: ${WA_FIRE_INIT_QUERIES:-false}
       GATEWAY_HEARTBEAT_INTERVAL_MS: ${GATEWAY_HEARTBEAT_INTERVAL_MS:-600000}
       RECENT_MESSAGE_LIMIT: ${RECENT_MESSAGE_LIMIT:-500}
+      MAX_PENDING_MESSAGES: ${MAX_PENDING_MESSAGES:-500}
+      PENDING_RETRY_MIN_MS: ${PENDING_RETRY_MIN_MS:-2000}
+      PENDING_RETRY_MAX_MS: ${PENDING_RETRY_MAX_MS:-300000}
+      MAX_PENDING_ATTEMPTS: ${MAX_PENDING_ATTEMPTS:-12}
+      HEALTH_PORT: 8080
     volumes:
       - waauth:/data/wa-auth
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    logging: *default-logging
     restart: unless-stopped
     # tty para poder leer el QR con: docker compose -f docker-compose.prod.yml logs -f gateway
     stdin_open: true
@@ -87,8 +127,17 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:

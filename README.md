@@ -15,6 +15,8 @@ Estado actual del MVP:
 7. Respuesta configurable: solo texto, solo imagen o texto + imagen.
 8. Comandos operativos desde WhatsApp para confirmar, exportar, revisar pendientes y corregir participantes.
 9. Panel con trazabilidad de procesamiento, historial de decisiones y reporte descargable.
+10. Cola persistente e idempotencia por ID de WhatsApp para reintentar sin duplicar decisiones.
+11. Healthchecks, rotacion de logs, respaldo cifrado y monitor systemd del droplet.
 
 ## Mejoras Operativas
 
@@ -114,7 +116,11 @@ Produccion usa `docker-compose.prod.yml`:
 - `db`: PostgreSQL privado en la red Docker.
 - `gateway`: WhatsApp/Baileys con credenciales persistidas en volumen `waauth`.
 
-Guia completa: [docs/DESPLIEGUE_WHATSAPP.md](docs/DESPLIEGUE_WHATSAPP.md).
+Guias:
+
+- [Despliegue WhatsApp](docs/DESPLIEGUE_WHATSAPP.md)
+- [Operacion de produccion](docs/OPERACION_PRODUCCION.md)
+- [Respaldo y recuperacion](docs/BACKUP_RECOVERY.md)
 
 Variables clave de `.env.prod`:
 

@@ -55,6 +55,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Baileys persiste credenciales como archivos JSON en este volumen. El tar se
+# toma ANTES del dump. Si una entrada pendiente se procesa entre ambos snapshots,
+# la restauracion la reintentara y el message_id persistido en PostgreSQL evita
+# duplicarla. El orden inverso podia omitirla de ambos respaldos.
+tar -C "$wauth_path" -czf "${staging_dir}/waauth.tar.gz" .
+tar -tzf "${staging_dir}/waauth.tar.gz" >/dev/null
+tar -tzf "${staging_dir}/waauth.tar.gz" | grep -qE '(^|/)creds\.json$'
+
 docker exec "$DB_CONTAINER" sh -lc \
   'exec pg_dump --format=custom --no-owner --no-privileges --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' \
   >"${staging_dir}/postgres.dump"
@@ -65,12 +73,6 @@ docker exec -i "$DB_CONTAINER" pg_restore --list \
   <"${staging_dir}/postgres.dump" \
   >"${staging_dir}/pg_restore.list"
 test -s "${staging_dir}/pg_restore.list"
-
-# Baileys persiste credenciales como archivos JSON en este volumen. El tar se
-# toma en lectura y se valida antes de cifrarlo; el gateway sigue ejecutandose.
-tar -C "$wauth_path" -czf "${staging_dir}/waauth.tar.gz" .
-tar -tzf "${staging_dir}/waauth.tar.gz" >/dev/null
-tar -tzf "${staging_dir}/waauth.tar.gz" | grep -qE '(^|/)creds\.json$'
 
 (
   cd "$staging_dir"
