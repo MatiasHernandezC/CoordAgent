@@ -101,12 +101,18 @@ class SessionService:
             None,
         )
         if existing:
-            existing.channel_config.listening_enabled = True
-            existing.channel_config.trigger_word = trigger_word.strip()
-            existing.channel_config.group_name = clean_name
-            existing.channel_config.group_participant_count = group_participant_count
-            existing.title = f"WhatsApp - {clean_name}"
-            return repository.save(existing)
+            # La ruta ya mantiene group_lock. Anidamos siempre group -> session
+            # y releemos dentro del segundo lock: la copia obtenida por list_all
+            # puede haber quedado obsoleta mientras entraba un mensaje del grupo.
+            with self.session_lock(existing.id):
+                current = self.get(existing.id)
+                if current.channel_config.group_jid == clean_jid:
+                    current.channel_config.listening_enabled = True
+                    current.channel_config.trigger_word = trigger_word.strip()
+                    current.channel_config.group_name = clean_name
+                    current.channel_config.group_participant_count = group_participant_count
+                    current.title = f"WhatsApp - {clean_name}"
+                    return repository.save(current)
 
         session = Session(
             title=f"WhatsApp - {clean_name}",

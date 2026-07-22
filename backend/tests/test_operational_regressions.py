@@ -1,6 +1,8 @@
 """Regresiones de produccion: readiness, confirmacion estable y calendario RFC."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
@@ -109,6 +111,59 @@ def test_group_resolve_is_idempotent_after_lost_response(client):
     assert second["title"] == "WhatsApp - Equipo TAVI actualizado"
     assert second["channel_config"]["group_participant_count"] == 9
     assert len([item for item in sessions if item["channel_config"]["group_jid"] == payload["group_jid"]]) == 1
+
+
+def test_group_resolve_preserves_a_concurrent_session_message(client, monkeypatch):
+    payload = {
+        "group_jid": "120363000000000001@g.us",
+        "group_name": "Equipo concurrente",
+        "group_participant_count": 4,
+        "trigger_word": "@coordina",
+    }
+    session_id = client.post("/api/channel/groups/resolve", json=payload).json()["session"]["id"]
+
+    snapshot_taken = Event()
+    release_resolve = Event()
+    original_list_all = session_module.repository.list_all
+
+    def delayed_list_all():
+        sessions = original_list_all()
+        snapshot_taken.set()
+        assert release_resolve.wait(timeout=3)
+        return sessions
+
+    monkeypatch.setattr(session_module.repository, "list_all", delayed_list_all)
+    resolve_client = TestClient(app)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            resolve_client.post,
+            "/api/channel/groups/resolve",
+            json={**payload, "group_name": "Equipo concurrente actualizado"},
+        )
+        try:
+            assert snapshot_taken.wait(timeout=3)
+            message = client.post(
+                f"/api/sessions/{session_id}/channel/messages",
+                json={
+                    "sender": "Ana",
+                    "text": "yo puedo lunes en la tarde",
+                    "message_id": "wa-concurrent-resolve-001",
+                },
+            )
+            assert message.status_code == 200
+        finally:
+            release_resolve.set()
+        resolved = future.result(timeout=3)
+
+    assert resolved.status_code == 200
+    final_session = client.get(f"/api/sessions/{session_id}").json()["session"]
+    external_ids = {
+        item["external_id"]
+        for item in final_session["channel_messages"]
+        if item["kind"] == "human"
+    }
+    assert "wa-concurrent-resolve-001" in external_ids
+    assert final_session["channel_config"]["group_name"] == "Equipo concurrente actualizado"
 
 
 def test_duplicate_non_invoking_message_is_stored_once(client):
