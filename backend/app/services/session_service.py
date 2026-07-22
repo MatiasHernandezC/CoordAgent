@@ -1,8 +1,10 @@
 import csv
 import re
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from io import StringIO
+from threading import Lock, RLock
 
 from fastapi import HTTPException
 
@@ -36,6 +38,21 @@ else:
 
 
 class SessionService:
+    def __init__(self) -> None:
+        # FastAPI ejecuta endpoints sync en un threadpool. Cada lock protege el
+        # ciclo completo read-modify-write de una sesion sin bloquear grupos
+        # distintos entre si.
+        self._session_locks_guard = Lock()
+        self._session_locks = {}
+
+    @contextmanager
+    def session_lock(self, session_id: str):
+        with self._session_locks_guard:
+            lock = self._session_locks.setdefault(session_id, RLock())
+
+        with lock:
+            yield
+
     def create(self, title: str) -> Session:
         session = Session(
             title=title,

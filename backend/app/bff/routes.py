@@ -79,59 +79,68 @@ def get_session(session_id: str):
 @router.post("/sessions/{session_id}/message", response_model=MessageResponse)
 def add_message(session_id: str, payload: MessageRequest):
     started = perf_counter()
-    try:
-        extraction, source, token_usage = llm_service.extract_availability(payload.message)
-    except LlmUnavailableError as error:
-        raise_llm_http_error(error)
+    with session_service.session_lock(session_id):
+        try:
+            extraction, source, token_usage = llm_service.extract_availability(payload.message)
+        except LlmUnavailableError as error:
+            raise_llm_http_error(error)
 
-    session = session_service.merge_extraction(session_id, extraction, payload.message, source, token_usage)
-    return MessageResponse(
-        session=session,
-        llm_source=source,
-        elapsed_ms=elapsed_ms(started),
-        token_usage=token_usage,
-    )
+        session = session_service.merge_extraction(session_id, extraction, payload.message, source, token_usage)
+        return MessageResponse(
+            session=session,
+            llm_source=source,
+            elapsed_ms=elapsed_ms(started),
+            token_usage=token_usage,
+        )
 
 
 @router.post("/sessions/{session_id}/participants")
 def add_participant(session_id: str, payload: AddParticipantRequest):
-    return {"session": session_service.add_participant(session_id, payload.name)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.add_participant(session_id, payload.name)}
 
 
 @router.delete("/sessions/{session_id}/participants/{participant_name}")
 def remove_participant(session_id: str, participant_name: str):
-    return {"session": session_service.remove_participant(session_id, participant_name)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.remove_participant(session_id, participant_name)}
 
 
 @router.post("/sessions/{session_id}/availability")
 def add_availability(session_id: str, payload: AddAvailabilityRequest):
     slot = TimeSlot(day=payload.day, start=payload.start, end=payload.end)
-    return {"session": session_service.add_availability(session_id, payload.participant_name, slot)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.add_availability(session_id, payload.participant_name, slot)}
 
 
 @router.post("/sessions/{session_id}/calculate")
 def calculate(session_id: str):
-    return {"session": session_service.calculate(session_id)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.calculate(session_id)}
 
 
 @router.post("/sessions/{session_id}/confirm")
 def confirm(session_id: str, payload: ConfirmRequest):
-    return {"session": session_service.confirm(session_id, payload.option_id, source="panel")}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.confirm(session_id, payload.option_id, source="panel")}
 
 
 @router.post("/sessions/{session_id}/cancel-decision")
 def cancel_decision(session_id: str):
-    return {"session": session_service.cancel_decision(session_id)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.cancel_decision(session_id)}
 
 
 @router.post("/sessions/{session_id}/archive")
 def archive_session(session_id: str):
-    return {"session": session_service.archive(session_id)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.archive(session_id)}
 
 
 @router.post("/sessions/{session_id}/reopen")
 def reopen_session(session_id: str):
-    return {"session": session_service.reopen(session_id)}
+    with session_service.session_lock(session_id):
+        return {"session": session_service.reopen(session_id)}
 
 
 @router.get("/sessions/{session_id}/export", response_model=ExportResponse)
@@ -160,31 +169,34 @@ def export_calendar(session_id: str):
 
 @router.patch("/sessions/{session_id}/channel/config")
 def configure_channel(session_id: str, payload: ChannelConfigRequest):
-    session = session_service.configure_channel(
-        session_id,
-        payload.listening_enabled,
-        payload.trigger_word,
-        payload.reply_format,
-        payload.group_jid,
-        payload.group_name,
-        payload.group_participant_count,
-    )
-    return {"session": session}
+    with session_service.session_lock(session_id):
+        session = session_service.configure_channel(
+            session_id,
+            payload.listening_enabled,
+            payload.trigger_word,
+            payload.reply_format,
+            payload.group_jid,
+            payload.group_name,
+            payload.group_participant_count,
+        )
+        return {"session": session}
 
 
 @router.post("/sessions/{session_id}/channel/messages", response_model=ChannelMessageResponse)
 def add_channel_message(session_id: str, payload: ChannelMessageRequest):
     started = perf_counter()
-    session, invoked = session_service.add_channel_message(session_id, payload.sender, payload.text)
-    return invoke_channel_if_needed(session_id, session, invoked, started)
+    with session_service.session_lock(session_id):
+        session, invoked = session_service.add_channel_message(session_id, payload.sender, payload.text)
+        return invoke_channel_if_needed(session_id, session, invoked, started)
 
 
 @router.post("/sessions/{session_id}/channel/batch", response_model=ChannelMessageResponse)
 def add_channel_batch(session_id: str, payload: ChannelBatchRequest):
     started = perf_counter()
     messages = [(message.sender, message.text) for message in payload.messages]
-    session, invoked = session_service.add_channel_messages(session_id, messages)
-    return invoke_channel_if_needed(session_id, session, invoked, started)
+    with session_service.session_lock(session_id):
+        session, invoked = session_service.add_channel_messages(session_id, messages)
+        return invoke_channel_if_needed(session_id, session, invoked, started)
 
 
 def invoke_channel_if_needed(
