@@ -1,0 +1,80 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en .env.prod}
+      POSTGRES_DB: ${POSTGRES_DB:-meetingdb}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-meetingdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # Sin "ports": la base solo es accesible dentro de la red de Docker.
+
+  backend:
+    build: ./backend
+    environment:
+      APP_ENV: production
+      DB_BACKEND: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meetingdb}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      LLM_FALLBACK_ENABLED: "true"
+      CORS_ORIGINS: ${PUBLIC_URL:-http://localhost}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # Sin "ports": Caddy lo publica bajo /api.
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Mismo dominio que sirve Caddy: las llamadas /api quedan en el mismo origen.
+        VITE_API_URL: ${PUBLIC_URL:-http://localhost}
+    restart: unless-stopped
+    # Sin "ports": Caddy lo publica en la raiz.
+
+  gateway:
+    build: ./gateway
+    environment:
+      BACKEND_URL: http://backend:8000
+      TRIGGER_WORD: ${TRIGGER_WORD:-@coordina}
+      WA_AUTH_DIR: /data/wa-auth
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - waauth:/data/wa-auth
+    depends_on:
+      - backend
+    restart: unless-stopped
+    # tty para poder leer el QR con: docker compose -f docker-compose.prod.yml logs -f gateway
+    stdin_open: true
+    tty: true
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  waauth:
+  caddy_data:
+  caddy_config:

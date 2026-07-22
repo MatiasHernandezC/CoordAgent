@@ -8,6 +8,10 @@ backend/data/sessions.json
 frontend/node_modules/
 frontend/dist/
 
+gateway/node_modules/
+gateway/wa-auth/
+
 .env
 backend/.env
+.env.prod
 *.log
