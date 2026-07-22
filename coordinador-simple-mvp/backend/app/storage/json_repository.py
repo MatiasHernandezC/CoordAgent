@@ -52,5 +52,13 @@ class JsonRepository:
             return None
         return Session.model_validate(raw)
 
+    def list_all(self) -> list[Session]:
+        data = self._read()
+        return [Session.model_validate(raw) for raw in reversed(list(data.values()))]
+
+    def healthcheck(self) -> None:
+        """Valida que el archivo local siga siendo legible."""
+        self._read()
+
 
 repository = JsonRepository()

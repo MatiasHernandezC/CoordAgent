@@ -77,5 +77,10 @@ class PostgresRepository:
             )
         return result.rowcount > 0
 
+    def healthcheck(self) -> None:
+        """Comprueba que el pool puede ejecutar una consulta real."""
+        with self.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
 
 repository = PostgresRepository()

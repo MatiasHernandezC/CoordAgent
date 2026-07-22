@@ -12,22 +12,24 @@ def calculate_options(session: Session) -> list[TimeOption]:
 
 
 def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
-    # Diversifica las opciones: un solo bloque (el mejor) por dia, para no ofrecer
-    # tres horas seguidas del mismo grupo. La matriz llega ordenada por dia y hora
-    # ascendente, asi que ante empate de score se conserva el bloque mas temprano.
-    best_by_day: dict[str, AvailabilityCell] = {}
+    # Diversifica: un solo bloque (el mejor) por (semana, dia). Asi la misma
+    # persona en dias/semanas distintos no genera opciones redundantes, y dos
+    # semanas no colisionan. Ante empate de score se conserva el mas temprano.
+    best_by_slot: dict[tuple[int, str], AvailabilityCell] = {}
     for cell in matrix:
         if cell.score == 0:
             continue
-        best = best_by_day.get(cell.day)
+        key = (cell.week_offset, cell.day)
+        best = best_by_slot.get(key)
         if best is None or cell.score > best.score:
-            best_by_day[cell.day] = cell
+            best_by_slot[key] = cell
 
     options = [
         TimeOption(
             day=cell.day,  # type: ignore[arg-type]
             start=cell.start,
             end=cell.end,
+            week_offset=cell.week_offset,
             available_participants=cell.available_participants,
             unavailable_participants=cell.unavailable_participants,
             score=cell.score,
@@ -38,43 +40,58 @@ def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
                 cell.coverage_percent,
             ),
         )
-        for cell in best_by_day.values()
+        for cell in best_by_slot.values()
     ]
 
-    # Mejor cobertura primero; ante empate, orden de la semana y luego hora.
-    return sorted(options, key=lambda option: (-option.score, WEEKDAYS.index(option.day), option.start))[:3]
+    # Mejor cobertura primero; ante empate, semana mas cercana, dia y hora.
+    return sorted(
+        options,
+        key=lambda option: (-option.score, option.week_offset, WEEKDAYS.index(option.day), option.start),
+    )[:3]
 
 
 def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
     participant_names = [participant.name for participant in session.participants]
-    scores: dict[tuple[str, str, str], set[str]] = {}
+    expected_participants = max(
+        len(participant_names),
+        session.channel_config.group_participant_count or 0,
+        len(session.channel_config.group_participant_ids),
+        1,
+    )
+    workday_start = session.channel_config.workday_start_hour
+    workday_end = session.channel_config.workday_end_hour
+    scores: dict[tuple[int, str, str, str], set[str]] = {}
+    week_offsets: set[int] = {0}  # la semana actual siempre se muestra
 
     for participant in session.participants:
         for slot in participant.availability:
+            week_offsets.add(slot.week_offset)
             for block in split_into_hour_blocks(slot):
-                key = (block.day, block.start, block.end)
+                key = (block.week_offset, block.day, block.start, block.end)
                 scores.setdefault(key, set()).add(participant.name)
 
     matrix: list[AvailabilityCell] = []
-    for day in WEEKDAYS:
-        for hour in range(WORKDAY_START, WORKDAY_END):
-            start = f"{hour:02d}:00"
-            end = f"{hour + 1:02d}:00"
-            names = scores.get((day, start, end), set())
-            available = sorted(names)
-            unavailable = sorted(name for name in participant_names if name not in names)
-            coverage_percent = round((len(available) / max(len(participant_names), 1)) * 100)
-            matrix.append(
-                AvailabilityCell(
-                    day=day,  # type: ignore[arg-type]
-                    start=start,
-                    end=end,
-                    available_participants=available,
-                    unavailable_participants=unavailable,
-                    score=len(available),
-                    coverage_percent=coverage_percent,
+    for week_offset in sorted(week_offsets):
+        for day in WEEKDAYS:
+            for hour in range(workday_start, workday_end):
+                start = f"{hour:02d}:00"
+                end = f"{hour + 1:02d}:00"
+                names = scores.get((week_offset, day, start, end), set())
+                available = sorted(names)
+                unavailable = sorted(name for name in participant_names if name not in names)
+                coverage_percent = round((len(available) / expected_participants) * 100)
+                matrix.append(
+                    AvailabilityCell(
+                        day=day,  # type: ignore[arg-type]
+                        start=start,
+                        end=end,
+                        week_offset=week_offset,
+                        available_participants=available,
+                        unavailable_participants=unavailable,
+                        score=len(available),
+                        coverage_percent=coverage_percent,
+                    )
                 )
-            )
 
     return matrix
 
@@ -87,6 +104,16 @@ def find_missing_info(session: Session) -> list[str]:
     for participant in session.participants:
         if not participant.availability:
             missing.append(f"Falta disponibilidad de {participant.name}.")
+
+    expected_participants = max(
+        session.channel_config.group_participant_count or 0,
+        len(session.channel_config.group_participant_ids),
+    )
+    unidentified = max(expected_participants - len(session.participants), 0)
+    if unidentified:
+        missing.append(
+            f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo."
+        )
 
     return missing
 
@@ -116,8 +143,14 @@ def build_insights(session: Session) -> list[str]:
 
 
 def build_explanation(available: list[str], unavailable: list[str], coverage_percent: int) -> str:
-    if not unavailable:
+    if not unavailable and coverage_percent == 100:
         return f"Todos los participantes pueden asistir. Cobertura {coverage_percent}%."
+
+    if not unavailable:
+        return (
+            f"Asisten {len(available)} participante(s): {', '.join(available)}. "
+            f"Quedan integrantes del grupo sin disponibilidad identificada. Cobertura {coverage_percent}%."
+        )
 
     return (
         f"Asisten {len(available)} participante(s): {', '.join(available)}. "
@@ -138,6 +171,7 @@ def split_into_hour_blocks(slot: TimeSlot) -> list[TimeSlot]:
                 day=slot.day,
                 start=current.strftime("%H:%M"),
                 end=next_time.strftime("%H:%M"),
+                week_offset=slot.week_offset,
             )
         )
         current = next_time

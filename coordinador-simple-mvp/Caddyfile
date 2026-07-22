@@ -5,11 +5,29 @@
 {$PUBLIC_DOMAIN} {
 	encode gzip
 
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
 	# El backend monta sus rutas bajo /api y expone /health.
 	handle /api/* {
-		reverse_proxy backend:8000
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		reverse_proxy backend:8000 {
+			# Caddy sobrescribe este header despues de validar Basic Auth. El
+			# backend lo exige para las rutas que administran secretos.
+			header_up X-Coordina-Admin {http.auth.user.id}
+		}
 	}
 	handle /health {
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
 		reverse_proxy backend:8000
 	}
 

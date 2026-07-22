@@ -32,7 +32,7 @@ def test_channel_invocation_structures_messages_and_replies(tmp_path: Path):
     assert [participant.name for participant in session.participants] == ["Nicolas", "Camila"]
     assert session.options[0].day == "lunes"
     assert session.channel_messages[-1].kind == "agent"
-    assert "Mejor opcion sugerida" in session.channel_messages[-1].text
+    assert "Mejor opcion" in session.channel_messages[-1].text
 
 
 def test_batch_channel_messages_save_once_and_detect_invocation(tmp_path: Path):

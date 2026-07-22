@@ -19,7 +19,8 @@ export function formatElapsed(ms: number) {
 
 export function formatTokenUsage(usage: TokenUsage) {
   if (usage.cached) return "cache: 0 tokens";
-  return `${usage.total_tokens} tokens, costo aprox. $${usage.estimated_cost_usd.toFixed(6)}`;
+  const ttft = usage.time_to_first_token_ms === null ? "" : `, TTFT ${formatElapsed(usage.time_to_first_token_ms)}`;
+  return `${usage.total_tokens} tokens, costo aprox. $${usage.estimated_cost_usd.toFixed(6)}${ttft}`;
 }
 
 export function formatTokenTotals(totals: TokenTotals) {

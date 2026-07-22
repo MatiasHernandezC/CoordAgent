@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.schemas import AvailabilityRemoval, ExtractedAvailability
+from app.schemas import AvailabilityRemoval, ExtractedAvailability, Participant
 from app.services.session_service import SessionService
 from app.storage.json_repository import JsonRepository
 
@@ -98,6 +98,32 @@ def test_removal_without_slots_does_not_clear_existing_availability(tmp_path: Pa
     camila = next(participant for participant in session.participants if participant.name == "Camila")
 
     assert [(slot.day, slot.start, slot.end) for slot in camila.availability] == [("lunes", "16:00", "18:00")]
+
+
+def test_merge_extraction_matches_names_without_accents(tmp_path: Path):
+    service = SessionService()
+    original_repository = __import__("app.services.session_service", fromlist=["repository"])
+    original_repository.repository = JsonRepository(tmp_path / "sessions.json")
+
+    session = service.create("Acentos")
+    session = service.add_availability(session.id, "Nicolás", slot_from("lunes", "09:00", "10:00"))
+    session = service.merge_extraction(
+        session.id,
+        ExtractedAvailability(
+            participants=[
+                Participant(name="Nicolas", availability=[slot_from("martes", "14:00", "15:00")]),
+            ]
+        ),
+        "Nicolas puede martes a las 2",
+        "mock",
+    )
+
+    assert [participant.name for participant in session.participants] == ["Nicolás"]
+    nicolas = session.participants[0]
+    assert [(slot.day, slot.start, slot.end) for slot in nicolas.availability] == [
+        ("lunes", "09:00", "10:00"),
+        ("martes", "14:00", "15:00"),
+    ]
 
 
 def test_session_without_schema_version_defaults_to_1():

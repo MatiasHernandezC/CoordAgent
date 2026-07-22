@@ -1,116 +1,417 @@
-# Despliegue en un droplet con WhatsApp real
+# Despliegue En Droplet Con WhatsApp
 
-Integra un grupo de WhatsApp real con el backend, usando un *gateway* basado en
-[Baileys](https://github.com/WhiskeySockets/Baileys). El agente vive como una
-cuenta de WhatsApp dentro del grupo y responde cuando alguien escribe la palabra
-de invocacion (por defecto `@coordina`).
+Runbook para servir el panel en un dominio publico y conectar un numero dedicado
+de WhatsApp como bot de grupo.
 
-> **Aviso importante:** Baileys automatiza WhatsApp Web de forma **no oficial**,
-> lo que va contra los Terminos de Servicio de WhatsApp. Usa un **numero
-> dedicado o desechable**, nunca tu numero personal. Es apto para demos y
-> prototipos, no para produccion a gran escala. La API oficial (WhatsApp Cloud
-> API) **no soporta grupos**, por eso este camino usa la via no oficial.
+> Aviso: el gateway usa Baileys, que automatiza WhatsApp Web de forma no oficial.
+> Usalo con un numero dedicado para demos y pruebas controladas. No uses tu numero
+> personal ni prometas disponibilidad de producto comercial sobre esta via.
 
-## Arquitectura
+## Arquitectura De Produccion
 
+```mermaid
+flowchart LR
+  Browser["Navegador"] --> Caddy["Caddy :80/:443"]
+  Caddy --> Frontend["Frontend nginx"]
+  Caddy --> Backend["FastAPI"]
+  Backend --> DB["PostgreSQL"]
+  Backend --> Gemini["Gemini API"]
+  Backend --> Image["PNG calendario"]
+
+  Group["Grupo WhatsApp"] <--> Gateway["Baileys gateway"]
+  Gateway --> Backend
+  Gateway --> WAuth["waauth"]
+  DB --> PG["pgdata"]
 ```
-Grupo de WhatsApp  <->  gateway (Baileys)  ->  backend (FastAPI)  ->  PostgreSQL
-                                                     ^
-                                                     |
-                                              Gemini API (extraccion)
-Navegador (panel)  ->  Caddy (HTTPS)  ->  frontend / backend
-```
-
-El gateway reutiliza los endpoints de canal que ya existen en el backend
-(`/channel/messages`), asi que la logica de decision no cambia.
 
 ## Requisitos
 
-- Un droplet (Ubuntu) con **Docker** y **Docker Compose** instalados.
-- Un **numero de telefono dedicado** con WhatsApp instalado (para escanear el QR).
-- Una **API key de Gemini** (o usa `LLM_PROVIDER=mock` para probar sin IA).
-- Opcional pero recomendado: un **dominio** apuntando al droplet (para HTTPS).
-- Recursos: **1-2 GB de RAM** bastan (Baileys es liviano y el LLM corre en la nube).
+- Droplet Ubuntu con Docker y Docker Compose.
+- Dominio o subdominio apuntando al droplet.
+- Puertos `80` y `443` abiertos.
+- API key de Gemini o `LLM_PROVIDER=mock` para pruebas sin IA.
+- Numero dedicado con WhatsApp para escanear el QR.
+- Claves fuertes para Postgres y Basic Auth.
 
-## Pasos
+Recursos recomendados para este MVP:
 
-### 1. Subir el proyecto al droplet
-
-Copia la carpeta `coordinador-simple-mvp/` al droplet (con `scp`, `rsync` o `git`).
-
-### 2. Crear el archivo de entorno
-
-```bash
-cd coordinador-simple-mvp
-cp .env.prod.example .env.prod
-nano .env.prod   # completa dominio, clave de Postgres y GEMINI_API_KEY
+```txt
+1-2 vCPU
+1-2 GB RAM
+Docker + swap razonable si el droplet es pequeno
 ```
 
-### 3. Apuntar el dominio (si usas HTTPS)
+No se corre un LLM local en el droplet; Gemini corre en la nube.
 
-Crea un registro DNS `A` de tu subdominio hacia la IP del droplet, y abre los
-puertos 80 y 443 en el firewall del droplet. Caddy sacara el certificado solo.
+## DNS
 
-Para una prueba rapida sin dominio, deja `PUBLIC_DOMAIN=localhost` y
-`PUBLIC_URL=http://localhost` (Caddy servira por http en el puerto 80).
+Ejemplo usado en produccion:
 
-### 4. Construir y levantar
+```txt
+Tipo: A
+Nombre: coordina
+Valor: 161.35.17.179
+TTL: 14400
+```
+
+Resultado:
+
+```txt
+coordina.xshift007.com -> 161.35.17.179
+```
+
+Validar:
+
+```powershell
+nslookup coordina.xshift007.com
+```
+
+## Archivo `.env.prod`
+
+Crear desde el ejemplo:
+
+```bash
+cd /opt/coordinador-simple-mvp
+cp .env.prod.example .env.prod
+nano .env.prod
+```
+
+Variables principales:
+
+```txt
+PUBLIC_DOMAIN=coordina.xshift007.com
+PUBLIC_URL=https://coordina.xshift007.com
+
+BASIC_AUTH_USER=coordina
+BASIC_AUTH_HASH=...
+
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=...
+POSTGRES_DB=meetingdb
+
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=... # bootstrap: retirar despues de verificar la migracion
+LLM_KEYS_MASTER_KEY=...
+ADMIN_PROXY_HEADER_REQUIRED=true
+GEMINI_MODEL=gemini-2.5-flash-lite
+
+TRIGGER_WORD=@coordina
+LOG_LEVEL=info
+BOT_PHONE_NUMBER=+56...
+```
+
+Generar hash para Caddy:
+
+```bash
+docker run --rm caddy:2 caddy hash-password --plaintext "tu_password"
+```
+
+No imprimas ni pegues `.env.prod` en chats. El archivo contiene secretos.
+
+Genera una llave maestra de 32 bytes y guardala tambien en el custodio externo
+de secretos. No se incluye en los respaldos cifrados del proyecto:
+
+```bash
+openssl rand -base64 32
+```
+
+Al iniciar con `GEMINI_API_KEY` y `LLM_KEYS_MASTER_KEY`, el backend importa la
+llave heredada una sola vez como `Produccion heredada`. Verifica en el panel que
+aparezca cifrada y disponible; luego elimina `GEMINI_API_KEY` de `.env.prod` y
+recrea solo el backend. No elimines la llave maestra mientras existan
+credenciales cifradas.
+
+Las rutas `/api/admin/llm-keys*` requieren el usuario validado por Caddy. El
+frontend nunca guarda una llave Gemini en `localStorage` ni `sessionStorage`.
+
+## Levantar Produccion
+
+```bash
+cd /opt/coordinador-simple-mvp
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+Ver estado:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+```
+
+Servicios esperados:
+
+```txt
+db        PostgreSQL privado
+backend   FastAPI privado
+frontend  nginx interno
+gateway   Baileys sin puerto publico
+caddy     unico servicio con 80/443 publicados
+```
+
+## Vincular WhatsApp
+
+Ver QR:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f gateway
+```
+
+En el telefono del numero dedicado:
+
+```txt
+WhatsApp -> Dispositivos vinculados -> Vincular un dispositivo
+```
+
+Escanea el QR. Cuando el log diga que el gateway esta conectado, la sesion queda
+persistida en el volumen `waauth` y no deberia requerir QR en cada reinicio.
+
+## Agregar El Bot A Un Grupo
+
+Para pruebas, el administrador lo hace manualmente:
+
+1. Crea o abre el grupo de WhatsApp.
+2. Agrega el numero dedicado del bot al grupo.
+3. El bot se presenta solo con un mensaje de bienvenida y crea la sesion.
+4. Los participantes escriben disponibilidad normalmente.
+5. Alguien invoca al bot con `@coordina`.
+
+Ejemplos de mensajes entendidos:
+
+```txt
+yo puedo lunes en la tarde
+estoy libre lun de 3 a 5 pm
+me sirve mierc 15:30-17:00
+no me va bien martes de 10 a 12
+@coordina con imagen
+@coordina reinicia historial
+```
+
+El ultimo comando comienza una coordinacion nueva en el mismo grupo. El panel
+conserva la ronda anterior para auditoria, pero el extractor deja de usar sus
+mensajes, participantes, opciones y decision.
+
+El panel web tambien ofrece un flujo para armar un mensaje de invitacion hacia
+el administrador, pero por ahora el ingreso del bot al grupo es manual.
+
+## Sesiones Automaticas Por Grupo
+
+El gateway crea una sesion nueva cuando ve un `group_jid` desconocido. Guarda el
+mapeo en:
+
+```txt
+volumen waauth / group-sessions.json
+```
+
+El backend recibe metadata del grupo:
+
+```txt
+group_jid
+group_name
+group_participant_count
+```
+
+El panel muestra esas sesiones como grupos reales, separadas de pruebas manuales.
+
+## Formato De Respuesta
+
+El canal soporta:
+
+```txt
+text   -> solo mensaje
+image  -> solo imagen con caption
+both   -> texto + imagen
+```
+
+El default se guarda en `channel_config.reply_format`. La invocacion puede
+sobrescribirlo:
+
+```txt
+@coordina solo texto
+@coordina solo imagen
+@coordina con imagen
+```
+
+Si el render de imagen falla, el backend sigue respondiendo con texto.
+
+## Comandos Del Canal
+
+Ademas de proponer horarios, el bot entiende comandos dentro del grupo:
+
+```txt
+@coordina ayuda            -> lista lo que entiende y los comandos
+@coordina confirma         -> cierra la decision con la mejor opcion
+@coordina confirma 2       -> cierra con la opcion numero 2
+@coordina cancela          -> deshace la decision confirmada
+@coordina resumen          -> estado actual y opciones
+@coordina faltan           -> quienes no han dado su horario
+@coordina exportar         -> reporte de la sesion en texto
+@coordina quita a <nombre> -> elimina un participante
+```
+
+Al confirmar, el bot envia al grupo el mensaje de decision con la fecha
+concreta ("Lunes 13 de julio"), un link directo *Agregar a Google Calendar*
+(clickeable desde WhatsApp) y un archivo `.ics` para Outlook/Apple.
+
+Las propuestas tambien muestran la fecha real de cada opcion ("Lunes 13/07")
+y la imagen incluye las fechas en los encabezados de cada dia.
+
+Antes de ejecutar cualquier comando, el bot procesa la disponibilidad
+pendiente escrita desde su ultima respuesta, asi "confirma" y "resumen"
+siempre operan con datos al dia.
+
+## Validaciones Despues De Desplegar
+
+Desde una maquina externa:
+
+```powershell
+$pair = "usuario:password"
+$basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+$headers = @{ Authorization = "Basic $basic" }
+
+Invoke-RestMethod https://coordina.xshift007.com/api/runtime -Headers $headers
+Invoke-RestMethod https://coordina.xshift007.com/health -Headers $headers
+```
+
+Sin credenciales:
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}" https://coordina.xshift007.com/api/runtime
+curl.exe -s -o NUL -w "%{http_code}" https://coordina.xshift007.com/.env
+```
+
+Esperado:
+
+```txt
+/api/runtime sin auth -> 401
+/.env -> 404
+/health con auth -> ok=true
+```
+
+En el droplet:
+
+```bash
+docker stats --no-stream
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail 80 backend
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail 80 gateway
+```
+
+## Actualizar Codigo
+
+Respaldo consistente antes de tocar produccion:
+
+```bash
+/usr/local/sbin/tavi-coordina-backup
+```
+
+Este comando respalda PostgreSQL y el volumen `waauth`, valida ambos contenidos
+y cifra el resultado sin incluir `.env.prod`. La descarga y verificacion fuera
+del droplet se ejecutan desde Windows con:
+
+```powershell
+.\ops\pull_encrypted_backup.ps1
+```
+
+Procedimiento completo: [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md).
+
+Rebuild completo:
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 ```
 
-Esto levanta db, backend, frontend, gateway y Caddy. Todos con
-`restart: unless-stopped`, asi que sobreviven reinicios del droplet.
-
-### 5. Vincular WhatsApp (una sola vez)
-
-Mira los logs del gateway para ver el QR:
+Solo backend:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f gateway
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build backend
 ```
 
-En el telefono del numero dedicado: **WhatsApp -> Dispositivos vinculados ->
-Vincular un dispositivo** y escanea el QR. El log dira "Gateway conectado".
-La sesion queda guardada en el volumen `waauth`, asi que **no hay que reescanear**
-en cada reinicio.
+Solo frontend:
 
-### 6. Probar
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build frontend
+```
 
-1. Agrega el numero dedicado a un grupo de WhatsApp.
-2. Los participantes escriben su disponibilidad, por ejemplo:
-   - "yo puedo lunes en la tarde"
-   - "yo puedo martes en la manana"
-3. Alguien invoca al agente: "@coordina nos ayudas a cerrar horario?"
-4. El agente responde en el grupo con la mejor opcion y su cobertura.
+Solo gateway:
 
-El panel web (para revisar sesiones) queda en `https://tu-dominio/`.
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build gateway
+```
 
-## Mantenerlo corriendo
+## Gateway Resiliente
 
-- `restart: unless-stopped` reinicia los servicios si se caen o si el droplet se reinicia.
-- Datos persistentes en volumenes Docker: `pgdata` (base) y `waauth` (sesion de WhatsApp).
-- Ver estado: `docker compose -f docker-compose.prod.yml ps`
-- Ver logs: `docker compose -f docker-compose.prod.yml logs -f backend gateway`
-- Actualizar: `git pull` (o re-subir) y `docker compose -f docker-compose.prod.yml up -d --build`
+El gateway usa un supervisor liviano sobre Baileys:
 
-## Seguridad
+- Mantiene una sola conexion activa.
+- Reconecta con backoff exponencial si WhatsApp cierra el socket.
+- Deduplica mensajes recientes para reducir respuestas repetidas tras reconexion.
+- Corta llamadas HTTP al backend con timeout.
+- Desactiva `fireInitQueries` por defecto porque para este bot no necesitamos que
+  Baileys cargue propiedades/privacidad/bloqueos al iniciar; esas consultas eran
+  la fuente del timeout `unexpected error in 'init queries'`.
 
-- La base **no expone puerto** al exterior (solo la red interna de Docker).
-- Solo Caddy publica 80/443. Nada de 8000 ni 5432 abiertos.
-- Pon una `POSTGRES_PASSWORD` fuerte y no subas `.env.prod` al repo.
-- La app **no tiene autenticacion**: si el panel web va a ser publico, protégelo
-  (Cloudflare Access, basic auth en Caddy, o restriccion por IP).
+Variables opcionales:
 
-## Problemas comunes
+```txt
+API_TIMEOUT_MS=75000
+WA_CONNECT_TIMEOUT_MS=60000
+WA_KEEP_ALIVE_MS=30000
+WA_RECONNECT_MIN_MS=2000
+WA_RECONNECT_MAX_MS=60000
+WA_GROUP_SYNC_INTERVAL_MS=300000
+WA_FIRE_INIT_QUERIES=false
+GATEWAY_HEARTBEAT_INTERVAL_MS=600000
+RECENT_MESSAGE_LIMIT=500
+```
 
-- **No aparece el QR**: revisa `docker compose ... logs -f gateway`. Si dice
-  "sesion cerrada", borra el volumen y reescanea:
-  `docker compose -f docker-compose.prod.yml down` y luego
-  `docker volume rm coordinador-simple-mvp_waauth`, y vuelve a `up`.
-- **El agente no responde**: confirma que el mensaje contiene la palabra de
-  invocacion (`@coordina`) y que el numero del bot esta en el grupo.
-- **429 de Gemini**: el backend entra en cooldown y usa `mock` si el fallback
-  esta activo. Baja la frecuencia o revisa tu cuota.
-- **Numero baneado**: riesgo inherente de la via no oficial. Usa numero desechable.
+Si necesitas diagnosticar funciones internas de Baileys, puedes probar
+`WA_FIRE_INIT_QUERIES=true`, pero para la demo normal conviene dejarlo en `false`.
+
+## Seguridad Operativa
+
+- No publiques `8000`, `5432` ni puertos del gateway.
+- Manten `.env.prod`, `keys/`, `pgdata` y `waauth` fuera de git.
+- Cambia la clave de Basic Auth si se compartio por error.
+- Usa un numero de WhatsApp dedicado.
+- Manten `LLM_FALLBACK_ENABLED=true` para demos, salvo pruebas donde quieras fallar fuerte.
+- Revisa logs si hay respuestas raras antes de culpar al frontend.
+
+## Problemas Comunes
+
+### No aparece QR
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f gateway
+```
+
+Si la sesion quedo corrupta o cerrada:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod down
+docker volume rm coordinador-simple-mvp_waauth
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d gateway
+```
+
+Esto obliga a escanear QR nuevamente.
+
+### El bot no responde
+
+Revisar:
+
+- El numero del bot esta dentro del grupo.
+- El mensaje contiene el trigger configurado, por ejemplo `@coordina`.
+- El gateway esta conectado.
+- El backend responde `/health`.
+- No hay errores en `logs gateway` o `logs backend`.
+
+### Gemini responde 429 o 503
+
+El backend entra en cooldown. Si `LLM_FALLBACK_ENABLED=true`, usara reglas para
+mantener la demo operativa. Revisa cuota, billing y frecuencia de llamadas.
+
+### El panel carga pero no muestra datos
+
+Verifica credenciales de Basic Auth y CORS:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail 80 caddy
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail 80 backend
+```

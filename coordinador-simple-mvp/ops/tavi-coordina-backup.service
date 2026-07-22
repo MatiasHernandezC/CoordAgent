@@ -1,0 +1,20 @@
+[Unit]
+Description=Encrypted backup of TAVI Coordina PostgreSQL and WhatsApp state
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/sbin/tavi-coordina-backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# The job needs the Docker socket and writes only its backup/lock locations.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/backups/tavi-coordina /run/lock

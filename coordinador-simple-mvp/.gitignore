@@ -1,6 +1,7 @@
 backend/.venv/
 backend/.pytest_cache/
 backend/data/sessions.json
+backend/data/llm_keys.json
 
 **/__pycache__/
 *.py[cod]
@@ -14,4 +15,13 @@ gateway/wa-auth/
 .env
 backend/.env
 .env.prod
+keys/
+tmp_*.png
 *.log
+
+# Respaldos de produccion y material criptografico nunca van al repo.
+*.cms
+*.cms.sha256
+*.tar.gz
+*.dump
+private-key.pem
