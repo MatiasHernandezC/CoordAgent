@@ -7,6 +7,17 @@ def _compile(*entries: ScheduleEntry):
     return compile_interpretation(ScheduleInterpretation(entries=list(entries)))
 
 
+def test_compiler_uses_configurable_workday_for_full_day():
+    result = compile_interpretation(
+        ScheduleInterpretation(
+            entries=[ScheduleEntry(person="Ana", kind="available", days=["lunes"])]
+        ),
+        workday_start=7,
+        workday_end=20,
+    )
+    assert [(slot.start, slot.end) for slot in result.participants[0].availability] == [("07:00", "20:00")]
+
+
 def _slots(items):
     return [(slot.day, slot.start, slot.end) for slot in items]
 

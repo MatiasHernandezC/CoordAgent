@@ -801,6 +801,299 @@ button.session-row.selected {
   gap: 12px;
 }
 
+.key-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.status-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #97a39f;
+}
+
+.status-dot.ok {
+  background: #1a8b71;
+  box-shadow: 0 0 0 4px rgba(26, 139, 113, 0.12);
+}
+
+.status-dot.warn {
+  background: #b27922;
+  box-shadow: 0 0 0 4px rgba(178, 121, 34, 0.12);
+}
+
+.inline-warning {
+  border: 1px solid #e4d5ac;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff9e8;
+  color: #665933;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.key-create-form,
+.key-list {
+  display: grid;
+  gap: 9px;
+}
+
+.key-create-form small,
+.key-item small {
+  color: #65727a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.key-item {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #d8e2df;
+  border-radius: 9px;
+  padding: 10px;
+  background: #fbfcfc;
+}
+
+.key-item.active {
+  border-color: #74ad9f;
+  background: #f0faf6;
+}
+
+.key-title,
+.key-meta,
+.key-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-title {
+  justify-content: space-between;
+}
+
+.key-title > div {
+  display: grid;
+  gap: 2px;
+}
+
+.key-title span,
+.key-meta {
+  color: #65727a;
+  font-size: 11px;
+}
+
+.key-meta {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.key-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.key-usage-grid > div {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #e0e8e5;
+  border-radius: 7px;
+  padding: 7px;
+  background: #ffffff;
+}
+
+.key-usage-grid span {
+  color: #65727a;
+  font-size: 9px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.key-usage-grid strong {
+  color: #173d35;
+  font-size: 13px;
+}
+
+.ttft-card {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #dce7e3;
+  border-radius: 8px;
+  padding: 9px;
+  background: #fff;
+}
+
+.ttft-card.empty {
+  color: #65727a;
+  background: #f8faf9;
+}
+
+.ttft-card.empty > div,
+.ttft-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.ttft-card span,
+.ttft-head small {
+  color: #65727a;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.ttft-card strong {
+  color: #173d35;
+  font-size: 13px;
+}
+
+.ttft-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ttft-head small {
+  font-weight: 700;
+  text-align: right;
+  text-transform: none;
+}
+
+.ttft-track {
+  position: relative;
+  height: 9px;
+  margin: 2px 4px 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #5cae96 0 25%, #e1b052 25% 62.5%, #c56a5c 62.5% 100%);
+}
+
+.ttft-marker {
+  position: absolute;
+  top: 50%;
+  width: 3px;
+  height: 17px;
+  border: 2px solid #fff;
+  border-radius: 3px;
+  background: #173d35;
+  box-shadow: 0 1px 4px rgb(18 52 45 / 35%);
+  transform: translate(-50%, -50%);
+}
+
+.ttft-card.fast .ttft-head strong {
+  color: #167560;
+}
+
+.ttft-card.medium .ttft-head strong {
+  color: #9b690d;
+}
+
+.ttft-card.slow .ttft-head strong {
+  color: #a84338;
+}
+
+.ttft-axis,
+.ttft-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ttft-axis span {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: none;
+}
+
+.ttft-stats {
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.ttft-stats span {
+  display: inline-flex;
+  gap: 3px;
+  font-size: 8px;
+}
+
+.ttft-stats strong {
+  font-size: 9px;
+}
+
+.key-status {
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: #e9efed;
+  color: #53626a;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.key-status.ready {
+  background: #dff3eb;
+  color: #12624f;
+}
+
+.key-status.cooldown,
+.key-status.unverified {
+  background: #fff0c9;
+  color: #785719;
+}
+
+.key-status.invalid,
+.key-status.incompatible,
+.key-status.disabled {
+  background: #f5dfdc;
+  color: #82382f;
+}
+
+.key-error {
+  color: #9b3d33 !important;
+}
+
+.key-actions {
+  flex-wrap: wrap;
+}
+
+.delete-confirmation {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dfb6b0;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff3f1;
+}
+
+.delete-confirmation p {
+  color: #76544f;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.key-audit {
+  border-top: 1px solid #e4ebe8;
+  padding-top: 9px;
+  color: #53626a;
+  font-size: 12px;
+}
+
+.key-audit summary {
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.key-audit p {
+  margin-top: 7px;
+  line-height: 1.4;
+}
+
+.empty-state.compact {
+  padding: 9px;
+  font-size: 12px;
+}
+
 .format-grid {
   display: grid;
   gap: 8px;

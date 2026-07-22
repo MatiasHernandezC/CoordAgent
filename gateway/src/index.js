@@ -5,13 +5,14 @@ import { dirname, join } from "node:path";
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  jidNormalizedUser,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 
 import { sendAgentReply } from "./delivery.js";
+import { buildHumanRoster, identitiesOverlap } from "./group_metadata.js";
+import { channelMessagePayload, messageIdentityMetadataOf, messageTextOf } from "./message_metadata.js";
 import { PersistentQueue } from "./persistent_queue.js";
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://backend:8000";
@@ -42,18 +43,19 @@ const pendingQueue = new PersistentQueue(PENDING_FILE, MAX_PENDING_MESSAGES);
 
 let groupSessions = loadGroupSessions();
 const groupSessionPromises = new Map();
+const groupSyncPromises = new Map();
 let currentSock = null;
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let starting = false;
 let shuttingDown = false;
-let lastGroupSyncAt = 0;
 let connectionState = "starting";
 let lastConnectedAt = null;
 let lastDisconnectedAt = null;
 let lastConnectionReason = null;
 let drainingPending = false;
 let pendingDrainTimer = null;
+let groupSyncTimer = null;
 let queueOverflowCount = 0;
 let lastQueueErrorAt = null;
 const recentMessageIds = new Set();
@@ -111,6 +113,8 @@ function mapEntry(sessionId, groupJid, metadata) {
     group_jid: groupJid,
     group_name: metadata.groupName,
     group_participant_count: metadata.participantCount,
+    group_participant_ids: metadata.participantIds,
+    coordinator_ids: metadata.coordinatorIds,
     updated_at: new Date().toISOString()
   };
 }
@@ -125,11 +129,14 @@ async function readGroupMetadata(sock, groupJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
     const groupName = cleanLabel(metadata?.subject, "grupo de WhatsApp");
-    const participantCount = Array.isArray(metadata?.participants) ? metadata.participants.length : null;
-    return { groupName, participantCount };
+    const roster = buildHumanRoster(metadata?.participants, sock.user);
+    if (!roster) {
+      throw new Error("WhatsApp no entrego la lista de participantes");
+    }
+    return { groupName, ...roster };
   } catch (err) {
     logger.warn({ groupJid, err: String(err) }, "no pude leer metadata del grupo");
-    return { groupName: "grupo de WhatsApp", participantCount: null };
+    return null;
   }
 }
 
@@ -161,14 +168,18 @@ async function api(path, options = {}) {
 }
 
 async function configureBackendChannel(sessionId, groupJid, metadata) {
+  if (!metadata) {
+    throw new Error(`No se puede sincronizar ${groupJid} sin metadata valida`);
+  }
   await api(`/api/sessions/${sessionId}/channel/config`, {
     method: "PATCH",
     body: JSON.stringify({
-      listening_enabled: true,
       trigger_word: TRIGGER_WORD,
       group_jid: groupJid,
       group_name: metadata.groupName,
-      group_participant_count: metadata.participantCount
+      group_participant_count: metadata.participantCount,
+      group_participant_ids: metadata.participantIds,
+      coordinator_ids: metadata.coordinatorIds
     })
   });
 }
@@ -192,21 +203,33 @@ async function sessionForGroupUnlocked(sock, groupJid) {
   if (existingSessionId) {
     if (typeof existing === "string" || !existing.group_name) {
       const metadata = await readGroupMetadata(sock, groupJid);
-      await configureBackendChannel(existingSessionId, groupJid, metadata);
-      groupSessions[groupJid] = mapEntry(existingSessionId, groupJid, metadata);
-      saveGroupSessions(groupSessions);
-      logger.info({ groupJid, sessionId: existingSessionId }, "sesion existente enriquecida con metadata");
+      if (metadata) {
+        await configureBackendChannel(existingSessionId, groupJid, metadata);
+        groupSessions[groupJid] = mapEntry(existingSessionId, groupJid, metadata);
+        saveGroupSessions(groupSessions);
+        logger.info({ groupJid, sessionId: existingSessionId }, "sesion existente enriquecida con metadata");
+      } else {
+        logger.warn(
+          { groupJid, sessionId: existingSessionId },
+          "se conservo el padron existente porque WhatsApp no entrego metadata"
+        );
+      }
     }
     return existingSessionId;
   }
 
   const metadata = await readGroupMetadata(sock, groupJid);
+  if (!metadata) {
+    throw new Error(`No se pudo resolver ${groupJid}: metadata de WhatsApp no disponible`);
+  }
   const { session } = await api("/api/channel/groups/resolve", {
     method: "POST",
     body: JSON.stringify({
       group_jid: groupJid,
       group_name: metadata.groupName,
       group_participant_count: metadata.participantCount,
+      group_participant_ids: metadata.participantIds,
+      coordinator_ids: metadata.coordinatorIds,
       trigger_word: TRIGGER_WORD
     })
   });
@@ -217,38 +240,46 @@ async function sessionForGroupUnlocked(sock, groupJid) {
   return session.id;
 }
 
-async function syncKnownGroups(sock) {
-  const now = Date.now();
-  if (now - lastGroupSyncAt < GROUP_SYNC_INTERVAL_MS) return;
-  lastGroupSyncAt = now;
+async function syncGroupMetadata(sock, groupJid) {
+  const sessionId = sessionIdFromEntry(groupSessions[groupJid]);
+  if (!sessionId || !groupJid.endsWith("@g.us")) return false;
 
+  const inFlight = groupSyncPromises.get(groupJid);
+  if (inFlight) return inFlight;
+
+  const promise = (async () => {
+    const metadata = await readGroupMetadata(sock, groupJid);
+    if (!metadata) return false;
+
+    await configureBackendChannel(sessionId, groupJid, metadata);
+    groupSessions[groupJid] = mapEntry(sessionId, groupJid, metadata);
+    saveGroupSessions(groupSessions);
+    return true;
+  })().finally(() => {
+    if (groupSyncPromises.get(groupJid) === promise) {
+      groupSyncPromises.delete(groupJid);
+    }
+  });
+  groupSyncPromises.set(groupJid, promise);
+  return promise;
+}
+
+async function syncKnownGroups(sock) {
   let updated = 0;
   for (const [groupJid, entry] of Object.entries(groupSessions)) {
     const sessionId = sessionIdFromEntry(entry);
     if (!sessionId || !groupJid.endsWith("@g.us")) continue;
 
-    const metadata = await readGroupMetadata(sock, groupJid);
-    await configureBackendChannel(sessionId, groupJid, metadata);
-    groupSessions[groupJid] = mapEntry(sessionId, groupJid, metadata);
-    updated += 1;
+    try {
+      if (await syncGroupMetadata(sock, groupJid)) updated += 1;
+    } catch (err) {
+      logger.error({ groupJid, sessionId, err: String(err) }, "fallo sincronizando metadata de un grupo");
+    }
   }
 
   if (updated > 0) {
-    saveGroupSessions(groupSessions);
     logger.info({ updated }, "sesiones de grupos conocidas sincronizadas con metadata");
   }
-}
-
-function textOf(message) {
-  const content = message.message;
-  if (!content) return "";
-  return (
-    content.conversation ??
-    content.extendedTextMessage?.text ??
-    content.imageMessage?.caption ??
-    content.videoMessage?.caption ??
-    ""
-  );
 }
 
 function messageIdOf(message) {
@@ -317,7 +348,9 @@ function handleConnectionUpdate(sock, update) {
     lastConnectedAt = new Date().toISOString();
     lastConnectionReason = null;
     logger.info("Gateway conectado a WhatsApp. Escuchando grupos.");
-    syncKnownGroups(sock).catch((err) => logger.error({ err: String(err) }, "fallo sincronizando grupos conocidos"));
+    syncKnownGroups(sock).catch((err) =>
+      logger.error({ err: String(err) }, "fallo sincronizando grupos conocidos")
+    );
     drainPendingMessages(sock).catch((err) => logger.error({ err: String(err) }, "fallo drenando cola pendiente"));
   }
 
@@ -356,15 +389,19 @@ async function handleMessages(sock, { messages, type }) {
         continue;
       }
 
-      const text = textOf(message).trim().slice(0, MAX_TEXT);
+      const text = messageTextOf(message).trim().slice(0, MAX_TEXT);
       if (!text) continue;
 
-      const sender = cleanLabel(message.pushName || message.key.participant || "Participante", "Participante", MAX_SENDER);
+      const { senderId, senderAliases, mentionedJids } = messageIdentityMetadataOf(message, sock.user);
+      const sender = cleanLabel(message.pushName || senderId || "Participante", "Participante", MAX_SENDER);
       try {
         pendingQueue.enqueue({
           id: messageId,
           jid,
           sender,
+          senderId,
+          senderAliases,
+          mentionedJids,
           text,
           primarySent: false,
           documentSent: false
@@ -445,7 +482,7 @@ async function processPendingMessage(sock, item) {
   const sessionId = await sessionForGroup(sock, item.jid);
   const result = await api(`/api/sessions/${sessionId}/channel/messages`, {
     method: "POST",
-    body: JSON.stringify({ sender: item.sender, text: item.text, message_id: item.id })
+    body: JSON.stringify(channelMessagePayload(item))
   });
 
   if (result.invoked) {
@@ -481,14 +518,20 @@ async function handleGroupParticipants(sock, event) {
 
   try {
     const { id: jid, participants, action } = event ?? {};
-    if (action !== "add" || !jid || !jid.endsWith("@g.us")) return;
+    if (!jid || !jid.endsWith("@g.us")) return;
+
+    if (sessionIdFromEntry(groupSessions[jid])) {
+      const synced = await syncGroupMetadata(sock, jid);
+      if (synced) {
+        logger.info({ jid, action }, "padron del grupo sincronizado tras cambio de participantes");
+      }
+    }
+
+    if (action !== "add") return;
 
     // Solo saluda cuando el AGREGADO es el propio bot (no cada vez que entra alguien).
-    const me = jidNormalizedUser(sock.user?.id ?? "");
-    const added = (participants ?? []).map((participant) =>
-      jidNormalizedUser(typeof participant === "string" ? participant : participant?.id ?? "")
-    );
-    if (!me || !added.includes(me)) return;
+    const botWasAdded = (participants ?? []).some((participant) => identitiesOverlap(participant, sock.user));
+    if (!botWasAdded) return;
 
     await sessionForGroup(sock, jid);
     await sock.sendMessage(jid, { text: buildWelcomeMessage() });
@@ -506,6 +549,8 @@ function buildWelcomeMessage() {
     "Escriban su disponibilidad como un mensaje normal, por ejemplo:",
     "_yo puedo lunes en la tarde_",
     "_no me va bien martes de 10 a 12_",
+    "Si informan por otra persona, selecciónenla como mención real: _@Gabo puede todo el día_.",
+    "Usen una sola persona mencionada por mensaje.",
     "",
     `Cuando quieran propuestas, escriban *${TRIGGER_WORD}*.`,
     `Para ver todo lo que entiendo: *${TRIGGER_WORD} ayuda*.`
@@ -597,6 +642,7 @@ process.on("SIGTERM", () => {
   connectionState = "stopping";
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (pendingDrainTimer) clearTimeout(pendingDrainTimer);
+  if (groupSyncTimer) clearInterval(groupSyncTimer);
   closeCurrentSocket();
   healthServer.close(() => process.exit(0));
 });
@@ -606,6 +652,7 @@ process.on("SIGINT", () => {
   connectionState = "stopping";
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (pendingDrainTimer) clearTimeout(pendingDrainTimer);
+  if (groupSyncTimer) clearInterval(groupSyncTimer);
   closeCurrentSocket();
   healthServer.close(() => process.exit(0));
 });
@@ -633,6 +680,15 @@ setInterval(() => {
     "heartbeat gateway"
   );
 }, HEARTBEAT_INTERVAL_MS).unref();
+
+groupSyncTimer = setInterval(() => {
+  const sock = currentSock;
+  if (!sock || connectionState !== "connected" || shuttingDown) return;
+  syncKnownGroups(sock).catch((err) =>
+    logger.error({ err: String(err) }, "fallo en sincronizacion periodica de grupos")
+  );
+}, GROUP_SYNC_INTERVAL_MS);
+groupSyncTimer.unref();
 
 start().catch((err) => {
   logger.error({ err: String(err) }, "fallo al iniciar el gateway");

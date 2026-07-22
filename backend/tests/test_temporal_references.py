@@ -58,7 +58,11 @@ def test_torneo_case_manana_is_single_day_not_whole_week(monkeypatch, mock_servi
 
     messages = [
         ChannelMessage(sender="Nicolas", text="manana puedo juntarme a las 5 pm"),
-        ChannelMessage(sender="Nicolas", text="gabo puede manana despues de las 3pm"),
+        ChannelMessage(
+            sender="Nicolas",
+            text="@gabo puede manana despues de las 3pm",
+            mentioned_jids=["56933333333@s.whatsapp.net"],
+        ),
         ChannelMessage(sender="Nicolas", text="@coordina"),
     ]
     extraction, source, _ = mock_service.extract_channel_availability(messages)
@@ -78,3 +82,28 @@ def test_channel_transcript_resolves_relative_day(monkeypatch):
     )
     assert "jueves" in transcript
     assert "manana" not in transcript.lower()
+
+
+def test_torneo_cross_day_range_expands_each_workday(monkeypatch, mock_service):
+    import app.services.llm_service as llm_service
+
+    monkeypatch.setattr(llm_service, "current_workday_name", lambda now=None: "lunes")
+    messages = [
+        ChannelMessage(
+            sender="Nicolas",
+            text="@gabo puede desde mañana a las 3 de la tarde hasta el jueves antes de las 12",
+            mentioned_jids=["56933333333@s.whatsapp.net"],
+        ),
+        ChannelMessage(sender="Nicolas", text="@coordina"),
+    ]
+
+    extraction, source, _ = mock_service.extract_channel_availability(messages)
+    gabo = next(participant for participant in extraction.participants if participant.name == "Gabo")
+
+    assert source == "channel_mock"
+    assert [(slot.day, slot.start, slot.end) for slot in gabo.availability] == [
+        ("martes", "15:00", "18:00"),
+        ("miercoles", "09:00", "18:00"),
+        ("jueves", "09:00", "12:00"),
+    ]
+    assert "cross_day_range_normalized" in extraction.quality_flags

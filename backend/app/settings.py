@@ -105,10 +105,20 @@ class Settings:
         "GEMINI_URL",
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
     )
+    gemini_streaming_enabled: bool = env_bool("GEMINI_STREAMING_ENABLED", True)
     gemini_timeout_seconds: int = env_int("GEMINI_TIMEOUT_SECONDS", 45)
     gemini_cooldown_seconds: int = env_int("GEMINI_COOLDOWN_SECONDS", 60)
     gemini_input_price_per_million: float = env_float("GEMINI_INPUT_PRICE_PER_MILLION", 0.10)
     gemini_output_price_per_million: float = env_float("GEMINI_OUTPUT_PRICE_PER_MILLION", 0.40)
+
+    # Llaves Gemini administradas desde el panel. La llave maestra nunca se
+    # persiste junto a los secretos cifrados.
+    llm_keys_master_key: str = os.getenv("LLM_KEYS_MASTER_KEY", "")
+    llm_keys_file: Path = Path(os.getenv("LLM_KEYS_FILE", "data/llm_keys.json"))
+    admin_proxy_header_required: bool = env_bool(
+        "ADMIN_PROXY_HEADER_REQUIRED",
+        app_env == "production",
+    )
 
     @property
     def cors_origins(self) -> list[str]:
@@ -119,8 +129,12 @@ class Settings:
     def runtime_warnings(self) -> list[str]:
         warnings: list[str] = []
         if self.llm_provider == "gemini":
-            if not self.gemini_api_key:
-                warnings.append("Gemini esta seleccionado, pero falta GEMINI_API_KEY.")
+            if not self.gemini_api_key and not self.llm_keys_master_key:
+                warnings.append("Gemini esta seleccionado, pero no hay llaves configuradas.")
+            if not self.llm_keys_master_key:
+                warnings.append(
+                    "La administracion de llaves esta desactivada hasta definir LLM_KEYS_MASTER_KEY."
+                )
             if self.gemini_model == "gemini-3.0-flash":
                 warnings.append(
                     "gemini-3.0-flash no esta disponible en v1beta/generateContent; "

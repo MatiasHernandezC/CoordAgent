@@ -52,6 +52,14 @@ def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
 
 def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
     participant_names = [participant.name for participant in session.participants]
+    expected_participants = max(
+        len(participant_names),
+        session.channel_config.group_participant_count or 0,
+        len(session.channel_config.group_participant_ids),
+        1,
+    )
+    workday_start = session.channel_config.workday_start_hour
+    workday_end = session.channel_config.workday_end_hour
     scores: dict[tuple[int, str, str, str], set[str]] = {}
     week_offsets: set[int] = {0}  # la semana actual siempre se muestra
 
@@ -65,13 +73,13 @@ def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
     matrix: list[AvailabilityCell] = []
     for week_offset in sorted(week_offsets):
         for day in WEEKDAYS:
-            for hour in range(WORKDAY_START, WORKDAY_END):
+            for hour in range(workday_start, workday_end):
                 start = f"{hour:02d}:00"
                 end = f"{hour + 1:02d}:00"
                 names = scores.get((week_offset, day, start, end), set())
                 available = sorted(names)
                 unavailable = sorted(name for name in participant_names if name not in names)
-                coverage_percent = round((len(available) / max(len(participant_names), 1)) * 100)
+                coverage_percent = round((len(available) / expected_participants) * 100)
                 matrix.append(
                     AvailabilityCell(
                         day=day,  # type: ignore[arg-type]
@@ -96,6 +104,16 @@ def find_missing_info(session: Session) -> list[str]:
     for participant in session.participants:
         if not participant.availability:
             missing.append(f"Falta disponibilidad de {participant.name}.")
+
+    expected_participants = max(
+        session.channel_config.group_participant_count or 0,
+        len(session.channel_config.group_participant_ids),
+    )
+    unidentified = max(expected_participants - len(session.participants), 0)
+    if unidentified:
+        missing.append(
+            f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo."
+        )
 
     return missing
 
@@ -125,8 +143,14 @@ def build_insights(session: Session) -> list[str]:
 
 
 def build_explanation(available: list[str], unavailable: list[str], coverage_percent: int) -> str:
-    if not unavailable:
+    if not unavailable and coverage_percent == 100:
         return f"Todos los participantes pueden asistir. Cobertura {coverage_percent}%."
+
+    if not unavailable:
+        return (
+            f"Asisten {len(available)} participante(s): {', '.join(available)}. "
+            f"Quedan integrantes del grupo sin disponibilidad identificada. Cobertura {coverage_percent}%."
+        )
 
     return (
         f"Asisten {len(available)} participante(s): {', '.join(available)}. "

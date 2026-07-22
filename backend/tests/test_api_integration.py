@@ -386,7 +386,11 @@ def test_channel_understands_unavailable_after_hour(client):
         json={
             "messages": [
                 {"sender": "Nicolas", "text": "yo puedo lunes en la tarde"},
-                {"sender": "Camila", "text": "Elon no puede despues de las 4 el lunes"},
+                {
+                    "sender": "Camila",
+                    "text": "@Elon no puede despues de las 4 el lunes",
+                    "mentioned_jids": ["56944444444@s.whatsapp.net"],
+                },
                 {"sender": "Nicolas", "text": "@coordina"},
             ]
         },
@@ -397,6 +401,41 @@ def test_channel_understands_unavailable_after_hour(client):
     assert slots == [("lunes", "09:00", "16:00")]
     # Y no aparece como dato faltante.
     assert not any("Elon" in item for item in body["session"]["missing_info"])
+
+
+def test_torneo_cross_day_range_produces_full_overlap(client, monkeypatch):
+    import app.services.llm_service as llm_service_module
+
+    monkeypatch.setattr(llm_service_module, "current_workday_name", lambda now=None: "lunes")
+    session_id = _create(client, "WhatsApp - Torneo regression")
+    body = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Nicolas", "text": "yo puedo el miercoles a las 11 de la mañana"},
+                {
+                    "sender": "Nicolas",
+                    "text": "@gabo puede desde mañana a las 3 de la tarde hasta el jueves antes de las 12",
+                    "mentioned_jids": ["56933333333@s.whatsapp.net"],
+                },
+                {"sender": "Nicolas", "text": "@coordina"},
+            ]
+        },
+    ).json()
+
+    gabo = next(participant for participant in body["session"]["participants"] if participant["name"] == "Gabo")
+    assert [(slot["day"], slot["start"], slot["end"]) for slot in gabo["availability"]] == [
+        ("martes", "15:00", "18:00"),
+        ("miercoles", "09:00", "18:00"),
+        ("jueves", "09:00", "12:00"),
+    ]
+    best = body["session"]["options"][0]
+    assert (best["day"], best["start"], best["end"]) == ("miercoles", "11:00", "12:00")
+    assert best["coverage_percent"] == 100
+    assert set(best["available_participants"]) == {"Nicolas", "Gabo"}
+    assert body["session"]["last_processing"]["confidence"] == "medium"
+    assert "cross_day_range_normalized" in body["session"]["last_processing"]["quality_flags"]
+    assert "100% de cobertura" in (body["agent_reply"] or "")
 
 
 def test_channel_help_command_lists_commands(client):
@@ -413,8 +452,79 @@ def test_channel_help_command_lists_commands(client):
     assert "confirma" in reply
     assert "resumen" in reply
     assert "cancela" in reply
+    assert "reinicia historial" in reply
     # La ayuda no debe inventar participantes ni tocar los datos.
     assert body["session"]["participants"] == []
+
+
+def test_channel_reset_starts_a_clean_context_and_preserves_audit_history(client):
+    session_id = _create(client)
+    initial = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Nicolas", "text": "yo puedo lunes en la tarde"},
+                {"sender": "Camila", "text": "yo puedo lunes desde las 16"},
+                {"sender": "Nicolas", "text": "@coordina confirma 1"},
+            ]
+        },
+    ).json()["session"]
+    assert initial["status"] == "confirmed"
+    assert len(initial["decision_history"]) == 1
+    old_message_count = len(initial["channel_messages"])
+
+    # Este dato aun pendiente pertenece a la ronda que se quiere descartar.
+    client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Pedro", "text": "yo puedo viernes todo el dia", "message_id": "wa-before-reset"},
+    )
+    reset_payload = {
+        "sender": "Nicolas",
+        "text": "@coordina reinicia historial",
+        "message_id": "wa-reset-context",
+    }
+    response = client.post(f"/api/sessions/{session_id}/channel/messages", json=reset_payload)
+    body = response.json()
+    reset = body["session"]
+
+    assert response.status_code == 200
+    assert body["llm_source"] == "channel_command"
+    assert "Nueva coordinacion iniciada" in (body["agent_reply"] or "")
+    assert reset["participants"] == []
+    assert reset["options"] == []
+    assert reset["availability_matrix"] == []
+    assert reset["missing_info"] == []
+    assert reset["insights"] == []
+    assert reset["last_processing"] is None
+    assert reset["selected_option"] is None
+    assert reset["selected_event_date"] is None
+    assert reset["selected_calendar_event"] is None
+    assert reset["decision_summary"] is None
+    assert reset["status"] == "draft"
+    assert len(reset["decision_history"]) == 1  # auditoria historica, no contexto activo
+    assert len(reset["channel_messages"]) == old_message_count + 3
+    assert reset["channel_context_message_id"] == reset["channel_messages"][-1]["id"]
+
+    # Un retry de WhatsApp no crea otro corte ni vuelve a limpiar la sesion.
+    duplicate = client.post(f"/api/sessions/{session_id}/channel/messages", json=reset_payload).json()
+    assert duplicate["duplicate"] is True
+    assert duplicate["llm_source"] == "idempotent_replay"
+    assert len(duplicate["session"]["channel_messages"]) == len(reset["channel_messages"])
+    assert len(duplicate["session"]["channel_command_receipts"]) == 1
+
+    new_round = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Luisa", "text": "yo puedo jueves de 10 a 12"},
+                {"sender": "Nicolas", "text": "@coordina"},
+            ]
+        },
+    ).json()["session"]
+
+    assert {participant["name"] for participant in new_round["participants"]} == {"Luisa"}
+    assert "Pedro" not in {participant["name"] for participant in new_round["participants"]}
+    assert new_round["status"] == "calculated"
 
 
 def test_channel_cancel_command_reverts_confirmed_decision(client):
@@ -455,18 +565,25 @@ def test_channel_cancel_without_decision_replies_gracefully(client):
 
 def test_channel_command_removes_participant_and_recalculates(client):
     session_id = _create(client)
+    nicolas_jid = "56911111111@s.whatsapp.net"
+    camila_jid = "56922222222@s.whatsapp.net"
     payload = {
         "messages": [
-            {"sender": "Nicolas", "text": "yo puedo lunes en la tarde"},
-            {"sender": "Camila", "text": "yo puedo lunes desde las 16"},
-            {"sender": "Nicolas", "text": "@coordina"},
+            {"sender": "Nicolas", "sender_id": nicolas_jid, "text": "yo puedo lunes en la tarde"},
+            {"sender": "Camila", "sender_id": camila_jid, "text": "yo puedo lunes desde las 16"},
+            {"sender": "Nicolas", "sender_id": nicolas_jid, "text": "@coordina"},
         ]
     }
     client.post(f"/api/sessions/{session_id}/channel/batch", json=payload)
 
     response = client.post(
         f"/api/sessions/{session_id}/channel/messages",
-        json={"sender": "Nicolas", "text": "@coordina quitar Camila"},
+        json={
+            "sender": "Nicolas",
+            "sender_id": nicolas_jid,
+            "text": "@coordina quitar @Camila",
+            "mentioned_jids": [camila_jid],
+        },
     )
     body = response.json()
     names = [participant["name"] for participant in body["session"]["participants"]]
@@ -542,6 +659,322 @@ def test_channel_config_accepts_group_metadata(client):
     assert session["channel_config"]["group_jid"] == "120363000000000000@g.us"
     assert session["channel_config"]["group_name"] == "Equipo TAVI"
     assert session["channel_config"]["group_participant_count"] == 8
+
+
+def test_configurable_workday_is_applied_to_llm_extraction_and_options(client):
+    session_id = _create(client, "Horario extendido")
+    configured = client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"workday_start_hour": 7, "workday_end_hour": 20},
+    )
+    assert configured.status_code == 200
+
+    body = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Ana", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Ana", "text": "@coordina"},
+            ]
+        },
+    ).json()
+
+    ana = next(item for item in body["session"]["participants"] if item["name"] == "Ana")
+    assert [(slot["start"], slot["end"]) for slot in ana["availability"]] == [("07:00", "20:00")]
+    monday = [cell for cell in body["session"]["availability_matrix"] if cell["day"] == "lunes"]
+    assert monday[0]["start"] == "07:00"
+    assert monday[-1]["end"] == "20:00"
+    assert body["session"]["options"][0]["start"] == "07:00"
+
+
+def test_invalid_or_out_of_window_hours_are_rejected(client):
+    session_id = _create(client)
+    invalid = client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"workday_start_hour": 18, "workday_end_hour": 9},
+    )
+    assert invalid.status_code == 422
+
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"workday_start_hour": 10, "workday_end_hour": 17},
+    )
+    outside = client.post(
+        f"/api/sessions/{session_id}/availability",
+        json={"participant_name": "Ana", "day": "lunes", "start": "09:00", "end": "11:00"},
+    )
+    assert outside.status_code == 400
+    assert "ventana configurada" in outside.json()["detail"]
+
+
+def test_group_coverage_uses_real_roster_and_blocks_false_consensus(client):
+    session_id = _create(client, "Grupo de cuatro")
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={
+            "group_jid": "roster-test@g.us",
+            "group_participant_count": 4,
+            "group_participant_ids": ["ana@wa", "beto@wa", "carla@wa", "diego@wa"],
+            "coordinator_ids": ["ana@wa"],
+        },
+    )
+    body = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Ana", "sender_id": "ana@wa", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Beto", "sender_id": "beto@wa", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Ana", "sender_id": "ana@wa", "text": "@coordina"},
+            ]
+        },
+    ).json()
+
+    assert body["session"]["options"][0]["coverage_percent"] == 50
+    assert any("2 integrante" in item for item in body["session"]["missing_info"])
+    assert "Aun no se puede confirmar" in (body["agent_reply"] or "")
+
+
+def test_any_group_member_can_run_all_coordination_commands_but_revision_is_still_required(client):
+    session_id = _create(client, "Grupo colaborativo")
+    admin_jid = "56911111111@s.whatsapp.net"
+    member_jid = "56922222222@s.whatsapp.net"
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={
+            "group_jid": "protected@g.us",
+            "group_participant_count": 2,
+            "group_participant_ids": [admin_jid, member_jid],
+            "coordinator_ids": [admin_jid],
+        },
+    )
+    proposal = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Admin", "sender_id": admin_jid, "text": "yo puedo lunes todo el dia"},
+                {"sender": "Miembro", "sender_id": member_jid, "text": "yo puedo lunes todo el dia"},
+                {"sender": "Admin", "sender_id": admin_jid, "text": "@coordina"},
+            ]
+        },
+    ).json()
+    revision = proposal["session"]["proposal_revision"]
+    assert f"R{revision}" in (proposal["agent_reply"] or "")
+
+    missing_revision = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Miembro", "sender_id": member_jid, "text": "@coordina confirmar 1"},
+    ).json()
+    assert "Falta la revision" in (missing_revision["agent_reply"] or "")
+    assert missing_revision["session"]["selected_option"] is None
+
+    confirmed = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Miembro",
+            "sender_id": member_jid,
+            "text": f"@coordina confirmar 1 R{revision}",
+        },
+    ).json()
+    assert confirmed["session"]["status"] == "confirmed"
+    assert confirmed["session"]["decision_history"][-1]["confirmed_by"] == "Miembro"
+
+    cancelled = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Miembro", "sender_id": member_jid, "text": "@coordina cancela"},
+    ).json()
+    assert cancelled["session"]["status"] == "calculated"
+    assert cancelled["session"]["selected_option"] is None
+
+    removed = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Miembro",
+            "sender_id": member_jid,
+            "text": "@coordina quitar @Admin",
+            "mentioned_jids": [admin_jid],
+        },
+    ).json()
+    assert "Admin" not in {item["name"] for item in removed["session"]["participants"]}
+
+    reset = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Miembro", "sender_id": member_jid, "text": "@coordina reinicia historial"},
+    ).json()
+    assert reset["session"]["status"] == "draft"
+    assert reset["session"]["participants"] == []
+
+
+def test_any_group_member_can_reset_the_coordination_context(client):
+    session_id = _create(client, "Grupo con reinicio abierto")
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={
+            "group_jid": "open-reset@g.us",
+            "group_participant_count": 2,
+            "group_participant_ids": ["admin@wa", "member@wa"],
+            "coordinator_ids": ["admin@wa"],
+        },
+    )
+    before = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Miembro", "sender_id": "member@wa", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Admin", "sender_id": "admin@wa", "text": "@coordina"},
+            ]
+        },
+    ).json()["session"]
+    assert before["participants"]
+
+    response = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Miembro",
+            "sender_id": "member@wa",
+            "text": "@coordina reinicia historial",
+            "message_id": "wa-member-open-reset",
+        },
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["llm_source"] == "channel_command"
+    assert "Nueva coordinacion iniciada" in (body["agent_reply"] or "")
+    assert body["session"]["participants"] == []
+    assert body["session"]["status"] == "draft"
+
+
+def test_stale_group_revision_cannot_confirm_a_changed_option(client):
+    session_id = _create(client, "Revision inmutable")
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={
+            "group_jid": "revision@g.us",
+            "group_participant_count": 2,
+            "group_participant_ids": ["admin@wa", "member@wa"],
+            "coordinator_ids": ["admin@wa"],
+        },
+    )
+    shown = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Admin", "sender_id": "admin@wa", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Miembro", "sender_id": "member@wa", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Admin", "sender_id": "admin@wa", "text": "@coordina"},
+            ]
+        },
+    ).json()["session"]
+    old_revision = shown["proposal_revision"]
+
+    changed = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Miembro", "sender_id": "member@wa", "text": "en realidad yo puedo martes todo el dia"},
+    )
+    assert changed.status_code == 200
+    blocked = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Admin",
+            "sender_id": "admin@wa",
+            "text": f"@coordina confirmar 1 R{old_revision}",
+        },
+    ).json()
+    assert "propuesta cambio" in (blocked["agent_reply"] or "").lower()
+    assert blocked["session"]["selected_option"] is None
+
+
+def test_explicit_positive_correction_replaces_old_availability(client):
+    session_id = _create(client, "Correccion semantica")
+    client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Ana", "text": "yo puedo lunes todo el dia"},
+                {"sender": "Ana", "text": "@coordina"},
+            ]
+        },
+    )
+    corrected = client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {"sender": "Ana", "text": "en realidad yo puedo lunes de 3 a 4 de la tarde"},
+                {"sender": "Ana", "text": "@coordina"},
+            ]
+        },
+    ).json()["session"]
+    ana = next(item for item in corrected["participants"] if item["name"] == "Ana")
+    assert [(slot["day"], slot["start"], slot["end"]) for slot in ana["availability"]] == [
+        ("lunes", "15:00", "16:00")
+    ]
+
+
+def test_trigger_boundary_and_multiword_remove_command(client):
+    session_id = _create(client, "Comandos exactos")
+    ana_maria_jid = "56933333333@s.whatsapp.net"
+    client.post(
+        f"/api/sessions/{session_id}/channel/batch",
+        json={
+            "messages": [
+                {
+                    "sender": "Ana Maria",
+                    "sender_id": ana_maria_jid,
+                    "text": "yo puedo lunes todo el dia",
+                },
+                {"sender": "Nico", "sender_id": "56944444444@s.whatsapp.net", "text": "@coordina"},
+            ]
+        },
+    )
+    accidental = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Nico", "text": "habla con @coordinador para otra tarea"},
+    ).json()
+    assert accidental["invoked"] is False
+
+    removed = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Nico",
+            "text": "@coordina quitar @Ana Maria",
+            "mentioned_jids": [ana_maria_jid],
+        },
+    ).json()
+    assert removed["invoked"] is True
+    assert removed["session"]["participants"] == []
+
+
+def test_paused_and_archived_sessions_discard_new_channel_messages(client):
+    session_id = _create(client, "Ciclo de vida")
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"listening_enabled": False},
+    )
+    paused = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Ana", "text": "yo puedo lunes todo el dia"},
+    ).json()
+    assert paused["invoked"] is False
+    assert paused["session"]["channel_messages"] == []
+
+    # Una sincronizacion de metadata no debe reactivar la pausa.
+    synced = client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"group_name": "Grupo actualizado", "group_participant_count": 1},
+    ).json()["session"]
+    assert synced["channel_config"]["listening_enabled"] is False
+
+    client.patch(
+        f"/api/sessions/{session_id}/channel/config",
+        json={"listening_enabled": True},
+    )
+    client.post(f"/api/sessions/{session_id}/archive")
+    archived = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Ana", "text": "@coordina"},
+    ).json()
+    assert archived["invoked"] is False
+    assert archived["session"]["channel_messages"] == []
 
 
 # --- Cache ------------------------------------------------------------------

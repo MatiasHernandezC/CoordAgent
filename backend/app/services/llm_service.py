@@ -1,10 +1,12 @@
 import json
+import hashlib
 import logging
 import math
 import re
 import subprocess
 import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone, tzinfo
 from urllib.error import HTTPError
 import urllib.request
@@ -21,6 +23,8 @@ from app.schemas import (
     TimeSlot,
     TokenUsage,
 )
+from app.services.credential_crypto import CredentialEncryptionError
+from app.services.llm_key_service import llm_key_service
 from app.services.schedule_compiler import compile_interpretation
 from app.settings import settings
 
@@ -36,9 +40,50 @@ WORKDAY_START_HOUR = 9
 WORKDAY_END_HOUR = 18
 logger = logging.getLogger(__name__)
 
+_DAY_TOKEN_PATTERN = (
+    r"(?:lunes|lun\.?|martes|mar\.?|miercoles|mierc\.?|mier\.?|mie\.?|"
+    r"jueves|jue\.?|viernes|vier\.?|vie\.?)"
+)
+_CROSS_DAY_RANGE_PATTERN = re.compile(
+    rf"\b(?:desde|del)\s+(?:el\s+)?(?P<start_day>{_DAY_TOKEN_PATTERN})\b"
+    rf"(?P<start_body>.*?)\b(?:hasta|al)\s+(?:el\s+)?(?P<end_day>{_DAY_TOKEN_PATTERN})\b"
+    r"(?P<end_body>[^,;\n]*)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CrossDayRange:
+    start_day: str
+    end_day: str
+    start_hour: int
+    end_hour: int
+    week_offset: int
+    fragment: str
+    unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class ChannelIdentityBinding:
+    token: str
+    display_name: str
+    external_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedChannelMessage:
+    message: ChannelMessage
+    text: str
+    sender: ChannelIdentityBinding
+    mention: ChannelIdentityBinding | None = None
+    ambiguous_mention: bool = False
+    requires_mention: bool = False
+    has_authorized_subject: bool = False
+
 
 class GeminiApiError(RuntimeError):
     def __init__(self, status_code: int, detail: str, retry_after_seconds: int | None = None) -> None:
+        detail = redact_sensitive_text(detail)
         super().__init__(f"Gemini API error {status_code}: {detail}")
         self.status_code = status_code
         self.detail = detail
@@ -81,8 +126,14 @@ class LlmService:
         self._gemini_blocked_until = 0.0
         self._gemini_block_reason = ""
 
-    def extract_availability(self, message: str) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
-        cache_key = build_cache_key(message)
+    def extract_availability(
+        self,
+        message: str,
+        workday_start: int = WORKDAY_START_HOUR,
+        workday_end: int = WORKDAY_END_HOUR,
+    ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
+        validate_workday_window(workday_start, workday_end)
+        cache_key = build_cache_key(message, workday_start, workday_end)
         if settings.llm_cache_enabled and cache_key in self._cache:
             cached_extraction, cached_source, cached_tokens = self._cache[cache_key]
 
@@ -94,7 +145,7 @@ class LlmService:
 
         if settings.llm_provider == "local":
             try:
-                return self._remember(cache_key, self._extract_with_local_model(message), f"local_{settings.local_llm_model}", None)
+                return self._remember(cache_key, self._extract_with_local_model(message, workday_start, workday_end), f"local_{settings.local_llm_model}", None)
             except Exception as error:
                 if not settings.llm_fallback_enabled:
                     raise LlmUnavailableError(
@@ -102,7 +153,7 @@ class LlmService:
                         status_code=503,
                     ) from error
                 # No cachear fallbacks: el proximo intento debe reintentar el LLM real.
-                fallback = self._extract_with_mock_rules(message)
+                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
                 return fallback, f"mock_fallback_local_{settings.local_llm_model}", None
 
         if settings.llm_provider == "gemini":
@@ -117,12 +168,16 @@ class LlmService:
                         status_code=429,
                         retry_after_seconds=retry_after,
                     )
-                fallback = self._extract_with_mock_rules(message)
+                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
                 source = f"mock_fallback_gemini_cooldown_{settings.gemini_model}"
                 return fallback, source, None
 
             try:
-                extraction, token_usage = self._extract_with_gemini(message)
+                extraction, token_usage = self._extract_with_gemini_pool(
+                    message,
+                    workday_start,
+                    workday_end,
+                )
 
                 logger.info(
                     "Gemini token usage: prompt=%s completion=%s total=%s estimated_cost_usd=%s",
@@ -140,7 +195,8 @@ class LlmService:
                 )
 
             except GeminiApiError as error:
-                if error.status_code in {429, 503}:
+                no_keys_configured = error.detail.startswith("No hay llaves Gemini")
+                if error.status_code == 503 and not no_keys_configured:
                     cooldown = error.retry_after_seconds or settings.gemini_cooldown_seconds
                     self._block_gemini(cooldown, f"Gemini devolvio {error.status_code}.")
 
@@ -155,8 +211,13 @@ class LlmService:
 
                 # No cachear fallbacks: un 429/503 pasajero no debe dejar pegada
                 # la interpretacion del mock para este mensaje.
-                fallback = self._extract_with_mock_rules(message)
-                return fallback, f"mock_fallback_gemini_{error.status_code}_{settings.gemini_model}", None
+                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                source = (
+                    f"mock_fallback_gemini_{settings.gemini_model}"
+                    if no_keys_configured
+                    else f"mock_fallback_gemini_{error.status_code}_{settings.gemini_model}"
+                )
+                return fallback, source, None
 
             except Exception as error:
                 if not settings.llm_fallback_enabled:
@@ -167,35 +228,39 @@ class LlmService:
 
                 logger.warning("Gemini failed before request completion; using mock fallback. %s", error)
 
-                fallback = self._extract_with_mock_rules(message)
+                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
                 return fallback, f"mock_fallback_gemini_{settings.gemini_model}", None
         if settings.llm_provider == "ollama":
             try:
-                return self._remember(cache_key, self._extract_with_ollama(message), "ollama", None)
+                return self._remember(cache_key, self._extract_with_ollama(message, workday_start, workday_end), "ollama", None)
             except Exception as error:
                 if not settings.llm_fallback_enabled:
                     raise LlmUnavailableError(
                         f"Ollama fallo y el fallback esta desactivado: {error}",
                         status_code=503,
                     ) from error
-                fallback = self._extract_with_mock_rules(message)
+                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
                 return fallback, "mock_fallback", None
 
-        return self._remember(cache_key, self._extract_with_mock_rules(message), "mock", None)
+        return self._remember(cache_key, self._extract_with_mock_rules(message, workday_start, workday_end), "mock", None)
 
     def extract_channel_availability(
         self,
-        messages: list[ChannelMessage]
+        messages: list[ChannelMessage],
+        workday_start: int = WORKDAY_START_HOUR,
+        workday_end: int = WORKDAY_END_HOUR,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         transcript = build_channel_extraction_text(messages)
         if not has_extractable_scheduling_signal(transcript):
-            return ExtractedAvailability(), "channel_no_new_availability", None
+            guarded = normalize_channel_extraction(ExtractedAvailability(), messages)
+            source = "channel_identity_guard" if guarded.quality_flags else "channel_no_new_availability"
+            return guarded, source, None
 
-        extraction, source, token_usage = self.extract_availability(transcript)
+        extraction, source, token_usage = self.extract_availability(transcript, workday_start, workday_end)
         extraction = normalize_channel_extraction(extraction, messages)
         return extraction, f"channel_{source}", token_usage
 
-    def _extract_with_ollama(self, message: str) -> ExtractedAvailability:
+    def _extract_with_ollama(self, message: str, workday_start: int, workday_end: int) -> ExtractedAvailability:
         payload = {
             "model": settings.ollama_model,
             "stream": False,
@@ -215,10 +280,10 @@ class LlmService:
 
         content = raw["message"]["content"]
         parsed = json.loads(extract_json(content))
-        extraction = parse_extraction_payload(parsed, message)
-        return merge_missing_participants(extraction, self._extract_with_mock_rules(message))
+        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
+        return merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
 
-    def _extract_with_local_model(self, message: str) -> ExtractedAvailability:
+    def _extract_with_local_model(self, message: str, workday_start: int, workday_end: int) -> ExtractedAvailability:
         if not settings.local_llm_script.exists():
             raise FileNotFoundError(f"No existe local_llm.py en {settings.local_llm_script}")
 
@@ -231,7 +296,7 @@ class LlmService:
             str(settings.local_llm_max_tokens),
             "--temperature",
             "0.1",
-            build_extraction_prompt(message),
+            build_extraction_prompt(message, workday_start=workday_start, workday_end=workday_end),
         ]
         result = subprocess.run(
             command,
@@ -246,21 +311,25 @@ class LlmService:
             raise RuntimeError(result.stderr.strip() or "El LLM local fallo sin detalle.")
 
         parsed = json.loads(extract_json(result.stdout))
-        extraction = parse_extraction_payload(parsed, message)
-        return merge_missing_participants(extraction, self._extract_with_mock_rules(message))
+        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
+        return merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
 
     def _extract_with_gemini(
         self,
         message: str,
+        workday_start: int,
+        workday_end: int,
+        api_key: str | None = None,
     ) -> tuple[ExtractedAvailability, TokenUsage]:
-        if not settings.gemini_api_key:
+        selected_api_key = (api_key or settings.gemini_api_key).strip()
+        if not selected_api_key:
             raise ValueError("Falta GEMINI_API_KEY")
 
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": build_extraction_prompt(message)}],
+                    "parts": [{"text": build_extraction_prompt(message, workday_start=workday_start, workday_end=workday_end)}],
                 }
             ],
             "generationConfig": {
@@ -269,24 +338,30 @@ class LlmService:
             },
         }
 
-        url = settings.gemini_url.format(model=settings.gemini_model)
+        base_url = settings.gemini_url.format(model=settings.gemini_model)
+        url = build_gemini_stream_url(base_url) if settings.gemini_streaming_enabled else base_url
 
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "x-goog-api-key": settings.gemini_api_key,
+                "x-goog-api-key": selected_api_key,
             },
             method="POST",
         )
 
+        request_started = time.perf_counter()
         try:
             with urllib.request.urlopen(
                 request,
                 timeout=settings.gemini_timeout_seconds,
             ) as response:
-                raw = json.loads(response.read().decode("utf-8"))
+                if settings.gemini_streaming_enabled:
+                    raw, time_to_first_token_ms = read_gemini_sse(response, request_started)
+                else:
+                    raw = json.loads(response.read().decode("utf-8"))
+                    time_to_first_token_ms = None
 
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
@@ -301,8 +376,8 @@ class LlmService:
 
         parsed = json.loads(extract_json(content))
 
-        extraction = parse_extraction_payload(parsed, message)
-        extraction = merge_missing_participants(extraction, self._extract_with_mock_rules(message))
+        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
+        extraction = merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
 
         usage = raw.get("usageMetadata", {})
 
@@ -321,9 +396,159 @@ class LlmService:
                 prompt_tokens,
                 completion_tokens,
             ),
+            time_to_first_token_ms=time_to_first_token_ms,
         )
 
         return extraction, token_usage
+
+    def _extract_with_gemini_pool(
+        self,
+        message: str,
+        workday_start: int,
+        workday_end: int,
+    ) -> tuple[ExtractedAvailability, TokenUsage]:
+        candidates = llm_key_service.candidate_records()
+        if not candidates:
+            retry_after = llm_key_service.next_retry_seconds()
+            raise GeminiApiError(
+                429 if retry_after else 503,
+                "No hay llaves Gemini disponibles en este momento.",
+                retry_after,
+            )
+
+        attempted_ids: set[str] = set()
+        last_quota_error: GeminiApiError | None = None
+        for credential in candidates:
+            credential_id = credential["id"]
+            if credential_id in attempted_ids:
+                continue
+            attempted_ids.add(credential_id)
+            try:
+                api_key = llm_key_service.reveal_secret(credential)
+                result = self._extract_with_gemini(
+                    message,
+                    workday_start,
+                    workday_end,
+                    api_key=api_key,
+                )
+                llm_key_service.mark_success(credential_id, result[1])
+                logger.info(
+                    "Gemini request succeeded with credential_id=%s ttft_ms=%s",
+                    credential_id,
+                    result[1].time_to_first_token_ms,
+                )
+                return result
+            except CredentialEncryptionError:
+                logger.exception("Gemini credential could not be decrypted. credential_id=%s", credential_id)
+                llm_key_service.mark_invalid(credential_id, 500)
+                continue
+            except GeminiApiError as error:
+                if error.status_code == 429:
+                    cooldown = gemini_quota_cooldown_seconds(error, credential)
+                    llm_key_service.mark_quota(credential_id, cooldown)
+                    last_quota_error = error
+                    logger.warning(
+                        "Gemini quota exhausted; rotating credential_id=%s cooldown=%ss",
+                        credential_id,
+                        cooldown,
+                    )
+                    continue
+                if is_invalid_gemini_key_error(error):
+                    llm_key_service.mark_invalid(credential_id, error.status_code)
+                    logger.warning("Gemini credential rejected. credential_id=%s", credential_id)
+                    continue
+                if is_incompatible_gemini_model_error(error):
+                    llm_key_service.mark_incompatible(credential_id, error.status_code)
+                    logger.warning(
+                        "Gemini model unavailable for credential project; rotating credential_id=%s",
+                        credential_id,
+                    )
+                    continue
+                if error.status_code == 503:
+                    llm_key_service.mark_transient_error(credential_id, error.status_code)
+                raise
+
+        retry_after = llm_key_service.next_retry_seconds()
+        if last_quota_error is not None:
+            raise GeminiApiError(
+                429,
+                "Todas las llaves Gemini disponibles alcanzaron su limite.",
+                retry_after or last_quota_error.retry_after_seconds,
+            ) from last_quota_error
+        raise GeminiApiError(503, "No fue posible usar ninguna llave Gemini configurada.")
+
+    def test_gemini_credential(self, credential_id: str, actor: str) -> dict:
+        record = llm_key_service.get_record(credential_id)
+        try:
+            api_key = llm_key_service.reveal_secret(record)
+            self._probe_gemini_key(api_key)
+            llm_key_service.mark_success(credential_id)
+            llm_key_service.audit_test(record, actor, "ok")
+            return {"ok": True, "key": llm_key_service.public_record(credential_id)}
+        except CredentialEncryptionError:
+            llm_key_service.mark_invalid(credential_id, 500)
+            llm_key_service.audit_test(record, actor, "decrypt_error")
+            return {"ok": False, "key": llm_key_service.public_record(credential_id)}
+        except GeminiApiError as error:
+            if error.status_code == 429:
+                llm_key_service.mark_quota(
+                    credential_id,
+                    gemini_quota_cooldown_seconds(error, record),
+                )
+                result = "quota"
+            elif is_invalid_gemini_key_error(error):
+                llm_key_service.mark_invalid(credential_id, error.status_code)
+                result = "invalid"
+            elif is_incompatible_gemini_model_error(error):
+                llm_key_service.mark_incompatible(credential_id, error.status_code)
+                result = "incompatible"
+            else:
+                llm_key_service.mark_transient_error(credential_id, error.status_code)
+                result = f"error_{error.status_code}"
+            llm_key_service.audit_test(record, actor, result)
+            return {"ok": False, "key": llm_key_service.public_record(credential_id)}
+
+    def _probe_gemini_key(self, api_key: str) -> None:
+        model_url = settings.gemini_url.format(model=settings.gemini_model)
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "Responde unicamente con OK."}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 16,
+            },
+        }
+        request = urllib.request.Request(
+            model_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=settings.gemini_timeout_seconds) as response:
+                if response.status >= 400:
+                    raise GeminiApiError(response.status, "No fue posible validar la llave Gemini.")
+                try:
+                    raw = json.loads(response.read().decode("utf-8"))
+                    generated_text = extract_gemini_text(raw).strip()
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                    raise GeminiApiError(502, "Gemini devolvio una respuesta de validacion invalida.") from error
+                if not generated_text:
+                    raise GeminiApiError(502, "Gemini no genero contenido durante la validacion.")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise GeminiApiError(
+                error.code,
+                detail,
+                parse_retry_delay_seconds(detail),
+            ) from error
 
     def _is_gemini_in_cooldown(self) -> bool:
         return time.monotonic() < self._gemini_blocked_until
@@ -336,7 +561,12 @@ class LlmService:
         self._gemini_block_reason = reason
         logger.warning("Gemini provider paused for %s seconds. %s", seconds, reason)
     
-    def _extract_with_mock_rules(self, message: str) -> ExtractedAvailability:
+    def _extract_with_mock_rules(
+        self,
+        message: str,
+        workday_start: int = WORKDAY_START_HOUR,
+        workday_end: int = WORKDAY_END_HOUR,
+    ) -> ExtractedAvailability:
         participants: dict[str, Participant] = {}
         removals: list[AvailabilityRemoval] = []
         fragments = split_scheduling_fragments(message)
@@ -346,7 +576,7 @@ class LlmService:
             if not names:
                 continue
 
-            slots = detect_slots(fragment)
+            slots = detect_slots(fragment, workday_start, workday_end)
             week = detect_week_offset(fragment)
             if week:
                 slots = [slot.model_copy(update={"week_offset": week}) for slot in slots]
@@ -360,9 +590,16 @@ class LlmService:
         extraction = ExtractedAvailability(
             participants=list(participants.values()),
             removals=removals,
-            implied=build_implied_from_removals(removals),
+            implied=build_implied_from_removals(removals, workday_start, workday_end),
+            replacements=[
+                name
+                for fragment in fragments
+                if is_replacement_availability_fragment(fragment)
+                for name in detect_participant_names(fragment)
+            ],
         )
-        return apply_exclusive_availability_overrides(extraction, message)
+        extraction = apply_exclusive_availability_overrides(extraction, message, workday_start, workday_end)
+        return apply_cross_day_availability_overrides(extraction, message, workday_start, workday_end)
 
     def _remember(
         self,
@@ -535,7 +772,11 @@ def unique_names(names: list[str]) -> list[str]:
     return unique
 
 
-def build_implied_from_removals(removals: list[AvailabilityRemoval]) -> list[ImpliedAvailability]:
+def build_implied_from_removals(
+    removals: list[AvailabilityRemoval],
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> list[ImpliedAvailability]:
     """Pragmatica de no-disponibilidad parcial: "no puedo despues de las 16" implica
     poder antes. El merge solo la aplica si la persona no tiene nada ese dia."""
     implied: list[ImpliedAvailability] = []
@@ -544,13 +785,13 @@ def build_implied_from_removals(removals: list[AvailabilityRemoval]) -> list[Imp
         for slot in removal.slots:
             start_hour = int(slot.start[:2])
             end_hour = int(slot.end[:2])
-            if start_hour > 9:
+            if start_hour > workday_start:
                 complement.append(
-                    TimeSlot(day=slot.day, start="09:00", end=slot.start, week_offset=slot.week_offset)
+                    TimeSlot(day=slot.day, start=f"{workday_start:02d}:00", end=slot.start, week_offset=slot.week_offset)
                 )
-            if end_hour < 18:
+            if end_hour < workday_end:
                 complement.append(
-                    TimeSlot(day=slot.day, start=slot.end, end="18:00", week_offset=slot.week_offset)
+                    TimeSlot(day=slot.day, start=slot.end, end=f"{workday_end:02d}:00", week_offset=slot.week_offset)
                 )
         if complement:
             implied.append(
@@ -559,16 +800,21 @@ def build_implied_from_removals(removals: list[AvailabilityRemoval]) -> list[Imp
     return implied
 
 
-def parse_extraction_payload(parsed: dict, message: str) -> ExtractedAvailability:
+def parse_extraction_payload(
+    parsed: dict,
+    message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> ExtractedAvailability:
     """Parsea la salida del LLM: esquema semantico nuevo (entries) o legacy
     (participants/removals) como red de seguridad si el modelo no siguio el formato."""
     if isinstance(parsed, dict) and "entries" in parsed:
         interpretation = ScheduleInterpretation.model_validate(parsed)
-        extraction = compile_interpretation(interpretation)
-        return normalize_llm_extraction(extraction, message)
+        extraction = compile_interpretation(interpretation, workday_start, workday_end)
+        return normalize_llm_extraction(extraction, message, workday_start, workday_end)
 
     extraction = ExtractedAvailability.model_validate(parsed)
-    return normalize_llm_extraction(extraction, message)
+    return normalize_llm_extraction(extraction, message, workday_start, workday_end)
 
 
 def extraction_person_names(extraction: ExtractedAvailability) -> set[str]:
@@ -592,6 +838,7 @@ def merge_missing_participants(
     participants = list(primary.participants)
     removals = list(primary.removals)
     implied = list(primary.implied)
+    replacements = list(primary.replacements)
 
     for participant in secondary.participants:
         if participant.name.strip().lower() not in known:
@@ -605,8 +852,17 @@ def merge_missing_participants(
         if item.participant_name.strip().lower() not in known:
             implied.append(item.model_copy(deep=True))
 
+    for name in secondary.replacements:
+        if name.strip().lower() not in known and name not in replacements:
+            replacements.append(name)
+
     return primary.model_copy(
-        update={"participants": participants, "removals": removals, "implied": implied}
+        update={
+            "participants": participants,
+            "removals": removals,
+            "implied": implied,
+            "replacements": replacements,
+        }
     )
 
 
@@ -805,12 +1061,13 @@ def is_unavailability_fragment(fragment: str) -> bool:
 def build_channel_extraction_text(messages: list[ChannelMessage]) -> str:
     fragments: list[str] = []
     context_day: str | None = None
-    for message in messages:
-        if message.kind != "human":
+    for prepared in prepare_channel_messages(messages):
+        if prepared.requires_mention:
+            # Si un mensaje mezcla la propia disponibilidad con la de un
+            # tercero sin mención, se descarta completo: no es posible atribuir
+            # con seguridad qué horas pertenecen a cada sujeto después del LLM.
             continue
-
-        text = remove_invocation_tokens(message.text)
-        fragment = rewrite_first_person_availability(message.sender, text)
+        fragment = rewrite_first_person_availability(prepared.sender.token, prepared.text)
         # Ancla las referencias relativas ("hoy", "manana", "pasado manana") a un
         # dia habil concreto en el propio texto, para que tanto el LLM como el
         # mock reciban un dia real y no expandan a toda la semana.
@@ -826,7 +1083,7 @@ def build_channel_extraction_text(messages: list[ChannelMessage]) -> str:
         # Prefijo con el remitente: conserva la autoria de cada mensaje para que
         # el LLM atribuya la primera persona ("me queda el viernes") a quien
         # escribio, y para que el grounding reconozca los nombres.
-        fragments.append(f"- {message.sender.strip()}: {fragment}")
+        fragments.append(f"- {prepared.sender.token}: {fragment}")
 
     return "\n".join(fragment for fragment in fragments if fragment)
 
@@ -835,34 +1092,103 @@ def normalize_channel_extraction(
     extraction: ExtractedAvailability,
     messages: list[ChannelMessage],
 ) -> ExtractedAvailability:
-    signal_senders = {
-        message.sender.strip()
-        for message in messages
-        if message.kind == "human"
-        and has_extractable_scheduling_signal(
-            rewrite_first_person_availability(
-                message.sender,
-                remove_invocation_tokens(message.text),
-            )
+    prepared_messages = prepare_channel_messages(messages)
+    bindings: dict[str, ChannelIdentityBinding] = {}
+    self_report_tokens: set[str] = set()
+    ambiguous_mention = False
+    requires_mention = False
+
+    for prepared in prepared_messages:
+        self_rewritten = rewrite_first_person_availability(prepared.sender.token, prepared.text)
+        is_self_report = (
+            normalize(self_rewritten) != normalize(prepared.text)
+            and has_extractable_scheduling_signal(self_rewritten)
         )
-    }
-    if len(signal_senders) != 1:
-        return extraction
+        if is_self_report:
+            bindings[normalize(prepared.sender.token)] = prepared.sender
+            self_report_tokens.add(prepared.sender.token)
 
-    sender = next(iter(signal_senders))
+        if prepared.mention and has_extractable_scheduling_signal(prepared.text):
+            bindings[normalize(prepared.mention.token)] = prepared.mention
+        ambiguous_mention = ambiguous_mention or prepared.ambiguous_mention
+        requires_mention = requires_mention or prepared.requires_mention
+
+    if len(self_report_tokens) == 1:
+        sender = next(iter(self_report_tokens))
+        for participant in extraction.participants:
+            if participant.name.strip().lower() == "yo":
+                participant.name = sender
+
+        for removal in extraction.removals:
+            if removal.participant_name.strip().lower() == "yo":
+                removal.participant_name = sender
+
+        for item in extraction.implied:
+            if item.participant_name.strip().lower() == "yo":
+                item.participant_name = sender
+
+        extraction.replacements = [
+            sender if name.strip().lower() == "yo" else name
+            for name in extraction.replacements
+        ]
+
+    rejected = False
+    participants: list[Participant] = []
     for participant in extraction.participants:
-        if participant.name.strip().lower() == "yo":
-            participant.name = sender
+        binding = bindings.get(normalize(participant.name))
+        if not binding:
+            rejected = True
+            continue
+        participant.name = binding.display_name
+        participant.external_ids = list(binding.external_ids)
+        participant.external_id = canonical_channel_identity(binding.external_ids)
+        participants.append(participant)
 
+    removals: list[AvailabilityRemoval] = []
     for removal in extraction.removals:
-        if removal.participant_name.strip().lower() == "yo":
-            removal.participant_name = sender
+        binding = bindings.get(normalize(removal.participant_name))
+        if not binding:
+            rejected = True
+            continue
+        removal.participant_name = binding.display_name
+        removal.external_ids = list(binding.external_ids)
+        removal.external_id = canonical_channel_identity(binding.external_ids)
+        removals.append(removal)
 
+    implied: list[ImpliedAvailability] = []
     for item in extraction.implied:
-        if item.participant_name.strip().lower() == "yo":
-            item.participant_name = sender
+        binding = bindings.get(normalize(item.participant_name))
+        if not binding:
+            rejected = True
+            continue
+        item.participant_name = binding.display_name
+        item.external_ids = list(binding.external_ids)
+        item.external_id = canonical_channel_identity(binding.external_ids)
+        implied.append(item)
 
-    return extraction
+    replacements: list[str] = []
+    for name in extraction.replacements:
+        binding = bindings.get(normalize(name))
+        if not binding:
+            rejected = True
+            continue
+        replacements.append(binding.display_name)
+
+    quality_flags = list(extraction.quality_flags)
+    if (rejected or requires_mention) and "third_party_requires_mention" not in quality_flags:
+        quality_flags.append("third_party_requires_mention")
+    if ambiguous_mention and "ambiguous_mentioned_identity" not in quality_flags:
+        quality_flags.append("ambiguous_mentioned_identity")
+
+    return extraction.model_copy(
+        update={
+            "participants": participants,
+            "removals": removals,
+            "implied": implied,
+            "replacements": replacements,
+            "quality_flags": quality_flags,
+        }
+    )
 
 
 def has_today_reference(normalized_text: str) -> bool:
@@ -1006,7 +1332,10 @@ def has_extractable_scheduling_signal(text: str) -> bool:
 
 
 def remove_invocation_tokens(text: str) -> str:
-    return re.sub(r"@\w+", "", text).strip()
+    # La mención del bot no aporta disponibilidad. Las demás arrobas se
+    # conservan porque solo contextInfo.mentionedJid puede validarlas como una
+    # persona real en prepare_channel_messages.
+    return re.sub(r"(?<![\w@])@coordina(?![\w])", "", text, flags=re.IGNORECASE).strip()
 
 
 def _timezone_now(now: datetime | None = None) -> datetime:
@@ -1040,9 +1369,19 @@ def build_temporal_context(now: datetime | None = None) -> str:
     )
 
 
-def build_extraction_prompt(message: str, now: datetime | None = None) -> str:
+def build_extraction_prompt(
+    message: str,
+    now: datetime | None = None,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> str:
     return (
         f"{EXTRACTION_PROMPT.strip()}\n\n"
+        "Ventana horaria configurada para ESTA coordinacion:\n"
+        f"- Inicio del dia coordinable: {workday_start:02d}:00.\n"
+        f"- Fin del dia coordinable: {workday_end:02d}:00.\n"
+        "- start/end null significan estos limites configurados.\n"
+        "- Nunca inventes disponibilidad fuera de esta ventana.\n\n"
         f"{build_temporal_context(now)}\n\n"
         "Texto a analizar:\n"
         f"{message}\n\n"
@@ -1160,7 +1499,11 @@ def rewrite_first_person_availability(sender: str, text: str) -> str:
     return text
 
 
-def detect_slots(fragment: str) -> list[TimeSlot]:
+def detect_slots(
+    fragment: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> list[TimeSlot]:
     normalized = normalize(fragment)
     days = detect_days(normalized)
     if not days:
@@ -1169,31 +1512,28 @@ def detect_slots(fragment: str) -> list[TimeSlot]:
     range_hours = detect_time_range(normalized)
     if range_hours:
         start_hour, end_hour = range_hours
-        return [
-            TimeSlot(day=day, start=f"{start_hour:02d}:00", end=f"{end_hour:02d}:00")
-            for day in days
-        ]
+        return slots_in_workday(days, start_hour, end_hour, workday_start, workday_end)
 
-    start = "09:00"
-    end = "18:00"
+    start_hour = workday_start
+    end_hour = workday_end
 
     if is_unavailability_fragment(fragment):
         until_match = re.search(r"(hasta las|hasta la|hasta al menos las|hasta al menos la|al menos hasta las|al menos hasta la)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?", normalized)
         if until_match:
             hour = normalize_hour_for_context(int(until_match.group(2)), normalized, prefer_evening=True)
-            return [TimeSlot(day=day, start="09:00", end=f"{hour:02d}:00") for day in days]
+            return slots_in_workday(days, workday_start, hour, workday_start, workday_end)
 
         release_match = re.search(r"(me\s+desocupo|se\s+desocupa|desocupo|desocupa)\s+(a\s+(?:la|las)|recien\s+a\s+(?:la|las))?\s*(\d{1,2})(?::\d{2})?\s*(am|pm)?", normalized)
         if release_match:
             hour = normalize_hour_for_context(int(release_match.group(3)), normalized, prefer_evening=True)
-            return [TimeSlot(day=day, start="09:00", end=f"{hour:02d}:00") for day in days]
+            return slots_in_workday(days, workday_start, hour, workday_start, workday_end)
 
     if "cualquier hora" in normalized or "todo el dia" in normalized:
-        start, end = "09:00", "18:00"
+        start_hour, end_hour = workday_start, workday_end
     elif "manana" in normalized:
-        start, end = "09:00", "12:00"
+        start_hour, end_hour = workday_start, min(12, workday_end)
     elif "tarde" in normalized or "atrde" in normalized:
-        start, end = "15:00", "18:00"
+        start_hour, end_hour = max(15, workday_start), workday_end
 
     # Tope superior en fragmentos positivos: "puede el lunes pero no despues de
     # las 4" o "esta libre el lunes hasta las 4" acotan el final, no el inicio.
@@ -1208,24 +1548,44 @@ def detect_slots(fragment: str) -> list[TimeSlot]:
     upper_bound = negated_after_match or positive_until_match
     if upper_bound and not is_unavailability_fragment(fragment):
         hour = normalize_hour_for_context(int(upper_bound.group(1)), normalized)
-        bound_end = f"{hour:02d}:00"
-        if bound_end <= start:
-            start = "09:00"
-        return [TimeSlot(day=day, start=start, end=bound_end) for day in days if bound_end > start]
+        return slots_in_workday(days, start_hour, hour, workday_start, workday_end)
 
     hour_match = re.search(r"(desde las|desde la|despues de las|despues de la|despues las|despues la|pasado las|pasado la|tipo las|tipo la|como a las|como a la)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?", normalized)
     if hour_match:
         hour = normalize_hour_for_context(int(hour_match.group(2)), normalized)
-        start = f"{hour:02d}:00"
-        end = "18:00"
+        start_hour = hour
+        end_hour = workday_end
 
     exact_hour_match = re.search(r"\ba\s+(?:la|las|los)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?\b", normalized)
     if exact_hour_match:
         hour = normalize_hour_for_context(int(exact_hour_match.group(1)), normalized)
-        start = f"{hour:02d}:00"
-        end = f"{hour + 1:02d}:00"
+        start_hour = hour
+        end_hour = hour + 1
 
-    return [TimeSlot(day=day, start=start, end=end) for day in days]
+    return slots_in_workday(days, start_hour, end_hour, workday_start, workday_end)
+
+
+def slots_in_workday(
+    days: list[str],
+    start_hour: int,
+    end_hour: int,
+    workday_start: int,
+    workday_end: int,
+    week_offset: int = 0,
+) -> list[TimeSlot]:
+    start = max(start_hour, workday_start)
+    end = min(end_hour, workday_end)
+    if end <= start:
+        return []
+    return [
+        TimeSlot(
+            day=day,  # type: ignore[arg-type]
+            start=f"{start:02d}:00",
+            end=f"{end:02d}:00",
+            week_offset=week_offset,
+        )
+        for day in days
+    ]
 
 
 def detect_days(text: str) -> list[str]:
@@ -1247,6 +1607,249 @@ def detect_days(text: str) -> list[str]:
             days.append(day)
 
     return days
+
+
+def find_cross_day_ranges(
+    message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> list[CrossDayRange]:
+    """Reconoce disponibilidades continuas entre dos dias habiles.
+
+    El LLM puede representar el limite inicial y final como si pertenecieran al
+    mismo dia. Esta capa conserva el significado temporal del texto y lo expande
+    a bloques diarios dentro de la jornada 09:00-18:00.
+    """
+    ranges: list[CrossDayRange] = []
+    for fragment in split_scheduling_fragments(message):
+        normalized = normalize(fragment)
+        for match in _CROSS_DAY_RANGE_PATTERN.finditer(normalized):
+            start_day = _canonical_day_token(match.group("start_day"))
+            end_day = _canonical_day_token(match.group("end_day"))
+            if not start_day or not end_day:
+                continue
+
+            start_index = WEEKDAYS.index(start_day)
+            end_index = WEEKDAYS.index(end_day)
+            if end_index <= start_index:
+                continue
+
+            start_hour = _cross_day_boundary_hour(
+                match.group("start_body"), is_end=False, workday_start=workday_start, workday_end=workday_end
+            )
+            end_hour = _cross_day_boundary_hour(
+                match.group("end_body"), is_end=True, workday_start=workday_start, workday_end=workday_end
+            )
+            if start_hour is None or end_hour is None:
+                continue
+
+            ranges.append(
+                CrossDayRange(
+                    start_day=start_day,
+                    end_day=end_day,
+                    start_hour=start_hour,
+                    end_hour=end_hour,
+                    week_offset=detect_week_offset(fragment),
+                    fragment=fragment,
+                    unavailable=is_unavailability_fragment(fragment),
+                )
+            )
+    return ranges
+
+
+def apply_cross_day_availability_overrides(
+    extraction: ExtractedAvailability,
+    original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> ExtractedAvailability:
+    ranges = find_cross_day_ranges(original_message, workday_start, workday_end)
+    flags = list(extraction.quality_flags)
+    participants = [participant.model_copy(deep=True) for participant in extraction.participants]
+    removals = [removal.model_copy(deep=True) for removal in extraction.removals]
+    implied = [item.model_copy(deep=True) for item in extraction.implied]
+    applied = False
+
+    for day_range in ranges:
+        names = detect_participant_names(day_range.fragment)
+        if not names:
+            continue
+
+        slots = _slots_for_cross_day_range(day_range, workday_start, workday_end)
+        if not slots:
+            continue
+
+        covered_days = {slot.day for slot in slots}
+        for name in names:
+            if day_range.unavailable:
+                # Una negacion entre dias nunca debe convertirse en disponibilidad
+                # positiva aunque el proveedor haya interpretado mal sus extremos.
+                participant = next(
+                    (item for item in participants if normalize(item.name) == normalize(name)),
+                    None,
+                )
+                if participant is not None:
+                    participant.availability = [
+                        slot
+                        for slot in participant.availability
+                        if slot.week_offset != day_range.week_offset or slot.day not in covered_days
+                    ]
+
+                removal = next(
+                    (item for item in removals if normalize(item.participant_name) == normalize(name)),
+                    None,
+                )
+                if removal is None:
+                    removal = AvailabilityRemoval(participant_name=name)
+                    removals.append(removal)
+                kept_removals = [
+                    slot
+                    for slot in removal.slots
+                    if slot.week_offset != day_range.week_offset or slot.day not in covered_days
+                ]
+                removal.slots = _deduplicate_slots([*kept_removals, *slots])
+
+                complement: list[TimeSlot] = []
+                for slot in slots:
+                    start_hour = int(slot.start[:2])
+                    end_hour = int(slot.end[:2])
+                    if start_hour > workday_start:
+                        complement.extend(
+                            slots_in_workday(
+                                [slot.day], workday_start, start_hour, workday_start, workday_end, slot.week_offset
+                            )
+                        )
+                    if end_hour < workday_end:
+                        complement.extend(
+                            slots_in_workday(
+                                [slot.day], end_hour, workday_end, workday_start, workday_end, slot.week_offset
+                            )
+                        )
+                if complement:
+                    implied_item = next(
+                        (item for item in implied if normalize(item.participant_name) == normalize(name)),
+                        None,
+                    )
+                    if implied_item is None:
+                        implied_item = ImpliedAvailability(participant_name=name)
+                        implied.append(implied_item)
+                    implied_item.slots = _deduplicate_slots([*implied_item.slots, *complement])
+                applied = True
+                continue
+
+            participant = next(
+                (item for item in participants if normalize(item.name) == normalize(name)),
+                None,
+            )
+            if participant is None:
+                participant = Participant(name=name)
+                participants.append(participant)
+
+            # El rango es mas especifico que cualquier interpretacion del LLM
+            # para esos dias: reemplaza sus tramos, no los une con limites malos.
+            kept = [
+                slot
+                for slot in participant.availability
+                if slot.week_offset != day_range.week_offset or slot.day not in covered_days
+            ]
+            participant.availability = _deduplicate_slots([*kept, *slots])
+            applied = True
+
+    if applied and "cross_day_range_normalized" not in flags:
+        flags.append("cross_day_range_normalized")
+    elif not applied and _CROSS_DAY_RANGE_PATTERN.search(normalize(original_message)):
+        if "ambiguous_cross_day_range" not in flags:
+            flags.append("ambiguous_cross_day_range")
+
+    return extraction.model_copy(
+        update={
+            "participants": participants,
+            "removals": removals,
+            "implied": implied,
+            "quality_flags": flags,
+        }
+    )
+
+
+def _canonical_day_token(token: str) -> str | None:
+    normalized = normalize(token).strip().rstrip(".")
+    for day, aliases in DAY_ALIASES.items():
+        if normalized in {alias.rstrip(".") for alias in aliases}:
+            return day
+    return None
+
+
+def _cross_day_boundary_hour(
+    text: str,
+    is_end: bool,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> int | None:
+    match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text)
+    if not match:
+        return workday_end if is_end else workday_start
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if hour > 23 or minute > 59:
+        return None
+
+    normalized = normalize(text)
+    suffix = match.group(3)
+    if suffix == "pm" or "tarde" in normalized or "noche" in normalized:
+        if hour < 12:
+            hour += 12
+    elif suffix == "am" and hour == 12:
+        hour = 0
+    elif hour < 8:
+        hour += 12
+
+    if is_end and minute:
+        hour += 1
+    return max(workday_start, min(hour, workday_end))
+
+
+def _days_in_cross_day_range(day_range: CrossDayRange) -> list[str]:
+    start = WEEKDAYS.index(day_range.start_day)
+    end = WEEKDAYS.index(day_range.end_day)
+    return WEEKDAYS[start : end + 1]
+
+
+def _slots_for_cross_day_range(
+    day_range: CrossDayRange,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> list[TimeSlot]:
+    days = _days_in_cross_day_range(day_range)
+    if not days or day_range.start_hour >= workday_end or day_range.end_hour <= workday_start:
+        return []
+
+    slots: list[TimeSlot] = []
+    for index, day in enumerate(days):
+        start = day_range.start_hour if index == 0 else workday_start
+        end = day_range.end_hour if index == len(days) - 1 else workday_end
+        if end <= start:
+            continue
+        slots.append(
+            TimeSlot(
+                day=day,  # type: ignore[arg-type]
+                start=f"{start:02d}:00",
+                end=f"{end:02d}:00",
+                week_offset=day_range.week_offset,
+            )
+        )
+    return slots
+
+
+def _deduplicate_slots(slots: list[TimeSlot]) -> list[TimeSlot]:
+    result: list[TimeSlot] = []
+    seen: set[tuple[int, str, str, str]] = set()
+    for slot in slots:
+        key = (slot.week_offset, slot.day, slot.start, slot.end)
+        if key not in seen:
+            seen.add(key)
+            result.append(slot)
+    return result
 
 
 # Numeros en palabras para "en N semanas" (mock; el LLM maneja el caso general).
@@ -1327,7 +1930,11 @@ def normalize(value: str) -> str:
     return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
-def build_cache_key(message: str) -> str:
+def build_cache_key(
+    message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> str:
     provider_model = {
         "local": settings.local_llm_model,
         "gemini": settings.gemini_model,
@@ -1337,7 +1944,15 @@ def build_cache_key(message: str) -> str:
     # La fecha entra en la clave: "manana" cambia de dia real cada dia, cachear
     # sin fecha reutilizaria una interpretacion relativa desactualizada.
     today = _timezone_now().strftime("%Y-%m-%d")
-    return f"{settings.llm_provider}:{provider_model}:{today}:{normalized_message}"
+    return (
+        f"{settings.llm_provider}:{provider_model}:{today}:"
+        f"{workday_start:02d}-{workday_end:02d}:{normalized_message}"
+    )
+
+
+def validate_workday_window(workday_start: int, workday_end: int) -> None:
+    if not 0 <= workday_start < workday_end <= 23:
+        raise ValueError("Ventana horaria invalida")
 
 
 def build_cached_token_usage(token_usage: TokenUsage | None) -> TokenUsage | None:
@@ -1372,7 +1987,12 @@ def build_gemini_unavailable_message(error: GeminiApiError) -> str:
     )
 
 
-def normalize_llm_extraction(extraction: ExtractedAvailability, original_message: str) -> ExtractedAvailability:
+def normalize_llm_extraction(
+    extraction: ExtractedAvailability,
+    original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> ExtractedAvailability:
     first_person = looks_like_first_person_message(original_message)
     invalid_names = {"", "el", "la", "los", "las", "un", "una", "al", "del", "no", "nos"}
 
@@ -1391,9 +2011,12 @@ def normalize_llm_extraction(extraction: ExtractedAvailability, original_message
         if first_person and item.participant_name.strip().lower() in invalid_names:
             item.participant_name = "Yo"
 
+    extraction.replacements = [normalize_person_name(name) for name in extraction.replacements]
+
     extraction = discard_invalid_names(extraction, invalid_names)
-    extraction = apply_grounded_availability_overrides(extraction, original_message)
-    extraction = apply_exclusive_availability_overrides(extraction, original_message)
+    extraction = apply_grounded_availability_overrides(extraction, original_message, workday_start, workday_end)
+    extraction = apply_exclusive_availability_overrides(extraction, original_message, workday_start, workday_end)
+    extraction = apply_cross_day_availability_overrides(extraction, original_message, workday_start, workday_end)
     extraction = discard_ungrounded_days(extraction, original_message)
     return ground_extraction_to_message(extraction, original_message, first_person)
 
@@ -1427,11 +2050,23 @@ def discard_invalid_names(extraction: ExtractedAvailability, invalid_names: set[
         for item in extraction.implied
         if item.participant_name.strip().lower() not in invalid_names
     ]
-    return extraction.model_copy(update={"participants": participants, "removals": removals, "implied": implied})
+    replacements = [name for name in extraction.replacements if name.strip().lower() not in invalid_names]
+    return extraction.model_copy(
+        update={
+            "participants": participants,
+            "removals": removals,
+            "implied": implied,
+            "replacements": replacements,
+        }
+    )
 
 
 def discard_ungrounded_days(extraction: ExtractedAvailability, original_message: str) -> ExtractedAvailability:
     allowed_days = set(detect_days(original_message))
+    # Un rango explicito martes-jueves fundamenta tambien el miercoles. Solo se
+    # amplian dias cuando ambos extremos fueron reconocidos y estan en orden.
+    for day_range in find_cross_day_ranges(original_message):
+        allowed_days.update(_days_in_cross_day_range(day_range))
     if not allowed_days:
         return extraction
 
@@ -1471,11 +2106,130 @@ def discard_ungrounded_days(extraction: ExtractedAvailability, original_message:
     return extraction.model_copy(update={"participants": participants, "removals": removals, "implied": implied})
 
 
+_CHANNEL_MENTION_PATTERN = re.compile(r"(?<![\w@])@([^\s,;:!?()\[\]{}]+)", re.UNICODE)
+
+
+def channel_identity_values(values: list[str | None] | tuple[str, ...]) -> list[str]:
+    identities: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = value.strip().lower() if value else ""
+        if cleaned and cleaned not in seen:
+            identities.append(cleaned)
+            seen.add(cleaned)
+    return identities
+
+
+def canonical_channel_identity(values: list[str] | tuple[str, ...]) -> str | None:
+    identities = channel_identity_values(tuple(values))
+    if not identities:
+        return None
+    return next((value for value in identities if value.endswith("@s.whatsapp.net")), identities[0])
+
+
+def channel_sender_aliases(messages: list[ChannelMessage]) -> dict[str, str]:
+    """Tokeniza cada remitente identificado por mensaje.
+
+    El token por mensaje conserva procedencia: un texto plano de Nicolas sobre
+    Gabriel no puede aprovechar que Gabriel haya escrito otro mensaje dentro
+    del mismo lote. Los mensajes del simulador sin JID mantienen su nombre para
+    compatibilidad, pero el gateway real siempre aporta identidad.
+    """
+    aliases: dict[str, str] = {}
+    for index, message in enumerate(messages):
+        identities = channel_identity_values([message.sender_id, *message.sender_aliases])
+        if identities:
+            digest = hashlib.sha256("|".join(sorted(identities)).encode("utf-8")).hexdigest()[:8]
+            aliases[message.id] = f"Remitente{index}x{digest}"
+        else:
+            aliases[message.id] = message.sender.strip()
+    return aliases
+
+
+def prepare_channel_messages(messages: list[ChannelMessage]) -> list[PreparedChannelMessage]:
+    sender_tokens = channel_sender_aliases(messages)
+    prepared_messages: list[PreparedChannelMessage] = []
+    for index, message in enumerate(messages):
+        if message.kind != "human":
+            continue
+
+        sender_ids = channel_identity_values([message.sender_id, *message.sender_aliases])
+        sender = ChannelIdentityBinding(
+            token=sender_tokens.get(message.id, message.sender.strip()),
+            display_name=normalize_person_name(message.sender.strip()),
+            external_ids=tuple(sender_ids),
+        )
+        text = remove_invocation_tokens(message.text)
+        text, mention, ambiguous = prepare_verified_mention(message, index, text)
+        rewritten = rewrite_first_person_availability(sender.token, text)
+        is_self_report = (
+            normalize(rewritten) != normalize(text)
+            and has_extractable_scheduling_signal(rewritten)
+        )
+        authorized_names = {
+            *( [normalize(sender.token)] if is_self_report else [] ),
+            *( [normalize(mention.token)] if mention and has_extractable_scheduling_signal(text) else [] ),
+        }
+        detected_names = {normalize(name) for name in detect_participant_names(rewritten)}
+        requires_mention = any(name not in authorized_names for name in detected_names)
+        prepared_messages.append(
+            PreparedChannelMessage(
+                message=message,
+                text=text,
+                sender=sender,
+                mention=mention,
+                ambiguous_mention=ambiguous,
+                requires_mention=requires_mention,
+                has_authorized_subject=bool(authorized_names),
+            )
+        )
+    return prepared_messages
+
+
+def prepare_verified_mention(
+    message: ChannelMessage,
+    message_index: int,
+    text: str,
+) -> tuple[str, ChannelIdentityBinding | None, bool]:
+    mentioned_ids = channel_identity_values(tuple(message.mentioned_jids))
+    if not mentioned_ids:
+        return text, None, False
+
+    mention_tokens = list(_CHANNEL_MENTION_PATTERN.finditer(text))
+    scheduling_signal = has_extractable_scheduling_signal(text)
+    # Sin una correspondencia uno-a-uno no se asigna por posición: el orden de
+    # mentionedJid no es una prueba suficiente para distinguir dos contactos.
+    if len(mentioned_ids) != 1 or len(mention_tokens) != 1:
+        return text, None, scheduling_signal
+
+    match = mention_tokens[0]
+    external_id = mentioned_ids[0]
+    raw_label = match.group(1).strip()
+    digest = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:8]
+    token = f"Mencionado{message_index}x{digest}"
+    if re.search(r"[^\W\d_]", raw_label, flags=re.UNICODE):
+        display_name = normalize_person_name(raw_label)
+    else:
+        display_name = f"Contacto {digest[:4].upper()}"
+    replaced = f"{text[:match.start()]}{token}{text[match.end():]}"
+    return (
+        replaced,
+        ChannelIdentityBinding(
+            token=token,
+            display_name=display_name,
+            external_ids=(external_id,),
+        ),
+        False,
+    )
+
+
 def apply_exclusive_availability_overrides(
     extraction: ExtractedAvailability,
     original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
 ) -> ExtractedAvailability:
-    overrides = find_exclusive_availability_overrides(original_message)
+    overrides = find_exclusive_availability_overrides(original_message, workday_start, workday_end)
     if not overrides:
         return extraction
 
@@ -1507,8 +2261,10 @@ def apply_exclusive_availability_overrides(
 def apply_grounded_availability_overrides(
     extraction: ExtractedAvailability,
     original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
 ) -> ExtractedAvailability:
-    overrides = find_grounded_availability_overrides(original_message)
+    overrides = find_grounded_availability_overrides(original_message, workday_start, workday_end)
     if not overrides:
         return extraction
 
@@ -1555,7 +2311,11 @@ def has_exclusive_week_constraint(original_message: str) -> bool:
     )
 
 
-def find_grounded_availability_overrides(original_message: str) -> list[tuple[str, list[TimeSlot]]]:
+def find_grounded_availability_overrides(
+    original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
+) -> list[tuple[str, list[TimeSlot]]]:
     overrides: list[tuple[str, list[TimeSlot]]] = []
     normalized = normalize(original_message)
     days = detect_days(normalized)
@@ -1579,7 +2339,7 @@ def find_grounded_availability_overrides(original_message: str) -> list[tuple[st
         overrides.append(
             (
                 participant_name,
-                [TimeSlot(day=day, start=f"{hour:02d}:00", end="18:00") for day in days],
+                slots_in_workday(days, hour, workday_end, workday_start, workday_end),
             )
         )
 
@@ -1599,6 +2359,8 @@ def detect_release_subject_name(normalized_message: str) -> str | None:
 
 def find_exclusive_availability_overrides(
     original_message: str,
+    workday_start: int = WORKDAY_START_HOUR,
+    workday_end: int = WORKDAY_END_HOUR,
 ) -> list[tuple[str, list[TimeSlot], list[TimeSlot]]]:
     overrides: list[tuple[str, list[TimeSlot], list[TimeSlot]]] = []
     for fragment in split_scheduling_fragments(original_message):
@@ -1609,7 +2371,7 @@ def find_exclusive_availability_overrides(
         if not participant_name:
             continue
 
-        availability = detect_slots(fragment)
+        availability = detect_slots(fragment, workday_start, workday_end)
         if not availability:
             continue
 
@@ -1619,7 +2381,12 @@ def find_exclusive_availability_overrides(
 
         available_days = {slot.day for slot in availability}
         removal_slots = [
-            TimeSlot(day=day, start="09:00", end="18:00", week_offset=week)
+            TimeSlot(
+                day=day,
+                start=f"{workday_start:02d}:00",
+                end=f"{workday_end:02d}:00",
+                week_offset=week,
+            )
             for day in WEEKDAYS
             if day not in available_days
         ]
@@ -1635,6 +2402,23 @@ def is_exclusive_availability_fragment(fragment: str) -> bool:
         and re.search(r"\b(puedo|puede|pueden|podre|podra|podran|podia|podian|podria|podrian|disponible|sirve|acomoda)\b", normalized)
         and detect_days(normalized)
     )
+
+
+def is_replacement_availability_fragment(fragment: str) -> bool:
+    """Detecta correcciones explicitas; una ampliacion con "tambien" no reemplaza."""
+    normalized = normalize(fragment)
+    if "tambien" in normalized:
+        return False
+    correction = re.search(
+        r"\b(?:en\s+realidad|en\s+verdad|me\s+corrijo|corrijo|correccion|"
+        r"quise\s+decir|actualizo(?:\s+mi)?\s+disponibilidad|ahora\s+solo)\b",
+        normalized,
+    )
+    positive = re.search(
+        r"\b(?:puedo|puede|pueden|podre|disponible|libre|sirve|acomoda|tinca)\b",
+        normalized,
+    )
+    return bool(correction and positive)
 
 
 def ground_extraction_to_message(
@@ -1709,11 +2493,74 @@ def parse_retry_delay_seconds(detail: str) -> int | None:
         retry_delay = item.get("retryDelay")
         if not retry_delay:
             continue
-        match = re.match(r"(\d+)s", retry_delay)
+        match = re.match(r"(\d+(?:\.\d+)?)s", retry_delay)
         if match:
-            return int(match.group(1))
+            return max(1, math.ceil(float(match.group(1))))
 
     return None
+
+
+def is_invalid_gemini_key_error(error: GeminiApiError) -> bool:
+    if error.status_code in {401, 403}:
+        return True
+    normalized = normalize(error.detail)
+    return error.status_code == 400 and any(
+        marker in normalized
+        for marker in (
+            "api_key_invalid",
+            "api key not valid",
+            "invalid api key",
+            "api key was reported as leaked",
+        )
+    )
+
+
+def is_incompatible_gemini_model_error(error: GeminiApiError) -> bool:
+    # generateContent identifica el modelo en la propia ruta; un 404 en esta
+    # llamada significa que el modelo configurado no esta disponible para el
+    # proyecto asociado a esa credencial, aunque la API key sea valida.
+    return error.status_code == 404
+
+
+def gemini_quota_cooldown_seconds(error: GeminiApiError, credential: dict) -> int:
+    if error.retry_after_seconds:
+        return error.retry_after_seconds
+    if is_daily_gemini_quota_error(error.detail):
+        pacific = _load_zoneinfo("America/Los_Angeles") or dt_timezone.utc
+        now = datetime.now(pacific)
+        tomorrow = (now + timedelta(days=1)).date()
+        reset = datetime.combine(tomorrow, datetime.min.time(), tzinfo=pacific)
+        return max(60, math.ceil((reset - now).total_seconds()))
+    failures = int(credential.get("failure_count", 0))
+    return min(
+        3600,
+        max(1, settings.gemini_cooldown_seconds) * (2 ** min(failures, 5)),
+    )
+
+
+def is_daily_gemini_quota_error(detail: str) -> bool:
+    normalized = normalize(detail)
+    return any(
+        marker in normalized
+        for marker in (
+            "per day",
+            "per_day",
+            "perday",
+            "requests per day",
+            "requestsdaily",
+            "rpd",
+        )
+    )
+
+
+def redact_sensitive_text(value: str) -> str:
+    sanitized = re.sub(r"AIza[0-9A-Za-z_-]{12,}", "[REDACTED_GEMINI_KEY]", value)
+    sanitized = re.sub(
+        r"(?i)(x-goog-api-key\s*[:=]\s*)[^\s,;\"']+",
+        r"\1[REDACTED]",
+        sanitized,
+    )
+    return sanitized
 
 
 def extract_json(content: str) -> str:
@@ -1723,13 +2570,76 @@ def extract_json(content: str) -> str:
     return match.group(0)
 
 
-def extract_gemini_text(raw: dict) -> str:
+def build_gemini_stream_url(url: str) -> str:
+    stream_url = url.replace(":generateContent", ":streamGenerateContent")
+    if "alt=sse" in stream_url:
+        return stream_url
+    separator = "&" if "?" in stream_url else "?"
+    return f"{stream_url}{separator}alt=sse"
+
+
+def read_gemini_sse(response, request_started: float) -> tuple[dict, int]:
+    text_chunks: list[str] = []
+    usage_metadata: dict = {}
+    event_data: list[str] = []
+    first_token_ms: int | None = None
+
+    def consume_event() -> None:
+        nonlocal first_token_ms, usage_metadata
+        if not event_data:
+            return
+        payload = "\n".join(event_data).strip()
+        event_data.clear()
+        if not payload or payload == "[DONE]":
+            return
+        chunk = json.loads(payload)
+        if chunk.get("error"):
+            error = chunk["error"]
+            raise GeminiApiError(
+                int(error.get("code", 500)),
+                json.dumps(error, ensure_ascii=False),
+                parse_retry_delay_seconds(json.dumps(error, ensure_ascii=False)),
+            )
+        for text in gemini_text_parts(chunk):
+            if first_token_ms is None:
+                first_token_ms = max(0, round((time.perf_counter() - request_started) * 1000))
+            text_chunks.append(text)
+        if chunk.get("usageMetadata"):
+            usage_metadata = dict(chunk["usageMetadata"])
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            consume_event()
+            continue
+        if line.startswith("data:"):
+            event_data.append(line[5:].lstrip())
+    consume_event()
+
+    if first_token_ms is None or not text_chunks:
+        raise ValueError("Gemini streaming response does not contain text")
+
+    return (
+        {
+            "candidates": [{"content": {"parts": [{"text": "".join(text_chunks)}]}}],
+            "usageMetadata": usage_metadata,
+        },
+        first_token_ms,
+    )
+
+
+def gemini_text_parts(raw: dict) -> list[str]:
     candidates = raw.get("candidates") or []
     if not candidates:
-        raise ValueError("Gemini response does not contain candidates")
-
+        return []
     parts = candidates[0].get("content", {}).get("parts") or []
-    texts = [part.get("text", "") for part in parts if part.get("text")]
+    return [part.get("text", "") for part in parts if part.get("text")]
+
+
+def extract_gemini_text(raw: dict) -> str:
+    texts = gemini_text_parts(raw)
+    if not raw.get("candidates"):
+        raise ValueError("Gemini response does not contain candidates")
     if not texts:
         raise ValueError("Gemini response does not contain text")
 

@@ -148,7 +148,10 @@ def test_compiler_drops_invalid_or_out_of_domain_entries():
         )
     )
 
-    assert result == ExtractedAvailability()
+    assert result.participants == []
+    assert result.removals == []
+    assert result.implied == []
+    assert result.quality_flags == ["invalid_interval_discarded"]
 
 
 def test_decision_engine_reflects_compiled_semantics(service):

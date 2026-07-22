@@ -32,9 +32,21 @@ def create_calculated_channel_session(client: TestClient) -> str:
         f"/api/sessions/{session_id}/channel/batch",
         json={
             "messages": [
-                {"sender": "Nicolas", "text": "yo puedo lunes en la tarde"},
-                {"sender": "Camila", "text": "yo puedo lunes desde las 16"},
-                {"sender": "Nicolas", "text": "@coordina"},
+                {
+                    "sender": "Nicolas",
+                    "sender_id": "56911111111@s.whatsapp.net",
+                    "text": "yo puedo lunes en la tarde",
+                },
+                {
+                    "sender": "Camila",
+                    "sender_id": "56922222222@s.whatsapp.net",
+                    "text": "yo puedo lunes desde las 16",
+                },
+                {
+                    "sender": "Nicolas",
+                    "sender_id": "56911111111@s.whatsapp.net",
+                    "text": "@coordina",
+                },
             ]
         },
     )
@@ -325,7 +337,13 @@ def test_remove_crash_replays_receipt_without_removing_twice(client, monkeypatch
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("crash after remove")),
     )
     safe_client = TestClient(app, raise_server_exceptions=False)
-    payload = {"sender": "Nicolas", "text": "@coordina quitar Camila", "message_id": "wa-crash-remove"}
+    payload = {
+        "sender": "Nicolas",
+        "sender_id": "56911111111@s.whatsapp.net",
+        "text": "@coordina quitar @Camila",
+        "mentioned_jids": ["56922222222@s.whatsapp.net"],
+        "message_id": "wa-crash-remove",
+    }
     assert safe_client.post(f"/api/sessions/{session_id}/channel/messages", json=payload).status_code == 500
     monkeypatch.setattr(session_module.session_service, "add_agent_channel_reply", original_add_reply)
 

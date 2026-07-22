@@ -1,4 +1,4 @@
-import type { OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
+import type { LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "coordina.basicAuth";
@@ -7,6 +7,16 @@ export type AuthCredentials = {
   username: string;
   password: string;
 };
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 export function getSavedAuth(): AuthCredentials | null {
   const encoded = sessionStorage.getItem(AUTH_STORAGE_KEY);
@@ -54,12 +64,13 @@ async function request<T>(path: string, init: RequestInit = {}, credentials?: Au
   }
 
   if (response.status === 401) {
-    throw new Error("Credenciales invalidas o sesion expirada.");
+    throw new ApiError(response.status, "Credenciales invalidas o sesion expirada.");
   }
 
   if (!response.ok) {
     const error = await response.json().catch(() => undefined);
-    throw new Error(error?.detail ?? "No se pudo completar la solicitud");
+    const detail = typeof error?.detail === "string" ? error.detail : "No se pudo completar la solicitud";
+    throw new ApiError(response.status, detail);
   }
 
   return response.json() as Promise<T>;
@@ -97,6 +108,40 @@ export function getRuntime() {
 export function getOpsStatus() {
   return request<OpsStatus>("/api/ops/status", {
     method: "GET"
+  });
+}
+
+export function listLlmKeys() {
+  return request<LlmKeyListResponse>("/api/admin/llm-keys", { method: "GET" });
+}
+
+export function createLlmKey(name: string, secret: string) {
+  return request<{ key: LlmKey }>("/api/admin/llm-keys", {
+    method: "POST",
+    body: JSON.stringify({ name, secret })
+  });
+}
+
+export function updateLlmKey(
+  credentialId: string,
+  updates: { name?: string; priority?: number; enabled?: boolean }
+) {
+  return request<{ key: LlmKey }>(`/api/admin/llm-keys/${credentialId}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates)
+  });
+}
+
+export function testLlmKey(credentialId: string) {
+  return request<{ ok: boolean; key: LlmKey }>(`/api/admin/llm-keys/${credentialId}/test`, {
+    method: "POST"
+  });
+}
+
+export function deleteLlmKey(credentialId: string, confirmName: string) {
+  return request<{ deleted: boolean }>(`/api/admin/llm-keys/${credentialId}`, {
+    method: "DELETE",
+    body: JSON.stringify({ confirm_name: confirmName })
   });
 }
 
@@ -148,10 +193,10 @@ export function calculateOptions(sessionId: string) {
   });
 }
 
-export function confirmOption(sessionId: string, optionId: string) {
+export function confirmOption(sessionId: string, optionId: string, expectedProposalRevision: number) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/confirm`, {
     method: "POST",
-    body: JSON.stringify({ option_id: optionId })
+    body: JSON.stringify({ option_id: optionId, expected_proposal_revision: expectedProposalRevision })
   });
 }
 
@@ -191,13 +236,18 @@ export function exportCalendar(sessionId: string) {
   });
 }
 
-export function configureChannel(sessionId: string, listeningEnabled: boolean, triggerWord: string) {
+export function configureChannel(
+  sessionId: string,
+  settings: {
+    listening_enabled?: boolean;
+    trigger_word?: string;
+    workday_start_hour?: number;
+    workday_end_hour?: number;
+  }
+) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/channel/config`, {
     method: "PATCH",
-    body: JSON.stringify({
-      listening_enabled: listeningEnabled,
-      trigger_word: triggerWord
-    })
+    body: JSON.stringify(settings)
   });
 }
 

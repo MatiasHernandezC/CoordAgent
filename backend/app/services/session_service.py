@@ -87,6 +87,8 @@ class SessionService:
         group_jid: str,
         group_name: str,
         group_participant_count: int | None,
+        group_participant_ids: list[str],
+        coordinator_ids: list[str],
         trigger_word: str,
     ) -> Session:
         """Create-or-get atomico por JID; un retry nunca crea otra sesion."""
@@ -107,11 +109,21 @@ class SessionService:
             with self.session_lock(existing.id):
                 current = self.get(existing.id)
                 if current.channel_config.group_jid == clean_jid:
-                    current.channel_config.listening_enabled = True
+                    previous_roster = (
+                        current.channel_config.group_participant_count,
+                        tuple(current.channel_config.group_participant_ids),
+                    )
                     current.channel_config.trigger_word = trigger_word.strip()
                     current.channel_config.group_name = clean_name
                     current.channel_config.group_participant_count = group_participant_count
+                    current.channel_config.group_participant_ids = unique_ids(group_participant_ids)
+                    current.channel_config.coordinator_ids = unique_ids(coordinator_ids)
                     current.title = f"WhatsApp - {clean_name}"
+                    if previous_roster != (
+                        current.channel_config.group_participant_count,
+                        tuple(current.channel_config.group_participant_ids),
+                    ):
+                        refresh_schedule_state(current)
                     return repository.save(current)
 
         session = Session(
@@ -122,6 +134,8 @@ class SessionService:
                 group_jid=clean_jid,
                 group_name=clean_name,
                 group_participant_count=group_participant_count,
+                group_participant_ids=unique_ids(group_participant_ids),
+                coordinator_ids=unique_ids(coordinator_ids),
             ),
             messages=[
                 ChatMessage(
@@ -158,11 +172,24 @@ class SessionService:
             session.messages.append(ChatMessage(role="user", content=original_message))
 
         session.participants = merge_duplicate_participants(session.participants)
+        replacement_keys = {participant_key(name) for name in extraction.replacements}
 
         for incoming in extraction.participants:
-            existing = find_participant(session.participants, incoming.name)
+            normalize_participant_identity(incoming)
+            existing = find_participant(
+                session.participants,
+                incoming.name,
+                incoming.external_id,
+                incoming.external_ids,
+            )
             if existing:
-                existing.availability = merge_slots(existing.availability, incoming.availability)
+                merge_participant_identity(existing, participant_identity_ids(incoming))
+                if is_generated_contact_name(existing.name) and not is_generated_contact_name(incoming.name):
+                    existing.name = incoming.name
+                if participant_key(incoming.name) in replacement_keys:
+                    existing.availability = merge_slots([], incoming.availability)
+                else:
+                    existing.availability = merge_slots(existing.availability, incoming.availability)
             else:
                 session.participants.append(incoming)
 
@@ -172,9 +199,19 @@ class SessionService:
         for implied in extraction.implied:
             if not implied.slots:
                 continue
-            participant = find_participant(session.participants, implied.participant_name)
+            participant = find_participant(
+                session.participants,
+                implied.participant_name,
+                implied.external_id,
+                implied.external_ids,
+            )
             if not participant:
-                participant = Participant(name=implied.participant_name.strip())
+                participant = Participant(
+                    name=implied.participant_name.strip(),
+                    external_id=implied.external_id,
+                    external_ids=implied.external_ids,
+                )
+                normalize_participant_identity(participant)
                 session.participants.append(participant)
             days_with_availability = {(slot.week_offset, slot.day) for slot in participant.availability}
             new_slots = [slot for slot in implied.slots if (slot.week_offset, slot.day) not in days_with_availability]
@@ -186,9 +223,19 @@ class SessionService:
             if not removal.slots:
                 continue
 
-            participant = find_participant(session.participants, removal.participant_name)
+            participant = find_participant(
+                session.participants,
+                removal.participant_name,
+                removal.external_id,
+                removal.external_ids,
+            )
             if not participant:
-                participant = Participant(name=removal.participant_name.strip())
+                participant = Participant(
+                    name=removal.participant_name.strip(),
+                    external_id=removal.external_id,
+                    external_ids=removal.external_ids,
+                )
+                normalize_participant_identity(participant)
                 session.participants.append(participant)
 
             participant.availability = remove_slots(participant.availability, removal.slots)
@@ -198,6 +245,7 @@ class SessionService:
             extraction.participants
             or any(removal.slots for removal in extraction.removals)
             or any(item.slots for item in extraction.implied)
+            or extraction.replacements
         )
         refresh_schedule_state(session, clear_decision=has_schedule_update)
         session.last_processing = build_processing_summary(source, extraction, token_usage)
@@ -228,6 +276,7 @@ class SessionService:
 
     def add_availability(self, session_id: str, participant_name: str, slot: TimeSlot) -> Session:
         session = self.get(session_id)
+        validate_slot_in_session_window(session, slot)
         session.participants = merge_duplicate_participants(session.participants)
         participant = find_participant(session.participants, participant_name)
         if not participant:
@@ -244,13 +293,25 @@ class SessionService:
         )
         return repository.save(session)
 
-    def remove_participant(self, session_id: str, name: str, external_id: str | None = None) -> Session:
+    def remove_participant(
+        self,
+        session_id: str,
+        name: str,
+        external_id: str | None = None,
+        *,
+        target_external_id: str | None = None,
+    ) -> Session:
         session = self.get(session_id)
         before = len(session.participants)
+        target_id = clean_external_id(target_external_id)
         session.participants = [
             participant
             for participant in merge_duplicate_participants(session.participants)
-            if participant_key(participant.name) != participant_key(name)
+            if (
+                target_id not in participant_identity_ids(participant)
+                if target_id
+                else participant_key(participant.name) != participant_key(name)
+            )
         ]
         if len(session.participants) == before:
             raise HTTPException(status_code=404, detail="Participant not found")
@@ -265,11 +326,7 @@ class SessionService:
     def calculate(self, session_id: str) -> Session:
         session = self.get(session_id)
         decision_is_confirmed = session.selected_option is not None and session.decision_summary is not None
-        matrix = build_availability_matrix(session)
-        session.availability_matrix = matrix
-        session.options = options_from_matrix(matrix)
-        session.missing_info = find_missing_info(session)
-        session.insights = build_insights(session)
+        refresh_schedule_state(session, clear_decision=not decision_is_confirmed)
         if session.options:
             best = session.options[0]
             session.messages.append(
@@ -289,11 +346,38 @@ class SessionService:
         source: str = "panel",
         external_id: str | None = None,
         now: datetime | None = None,
+        expected_proposal_revision: int | None = None,
     ) -> Session:
         session = self.get(session_id)
+        if expected_proposal_revision is not None and expected_proposal_revision != session.proposal_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="La propuesta cambio. Revisa las opciones actuales antes de confirmar.",
+            )
         option = find_option(session.options, option_id)
         if not option:
             raise HTTPException(status_code=400, detail="Option not found")
+        if session.selected_option and session.decision_summary and session.selected_option.id == option.id:
+            # Un doble clic del panel o un reintento del gateway debe devolver
+            # la decision ya cerrada, no crear otro registro de auditoria.
+            if external_id:
+                try:
+                    document_text = build_calendar_ics(session)
+                except Exception:
+                    document_text = None
+                add_command_receipt(
+                    session,
+                    external_id,
+                    "confirm",
+                    build_confirmed_channel_reply(session),
+                    attachment_kind="calendar" if document_text else None,
+                    document_text=document_text,
+                )
+                return repository.save(session)
+            return session
+        blockers = confirmation_blockers(session)
+        if blockers:
+            raise HTTPException(status_code=409, detail=" ".join(blockers))
 
         snapshot = create_calendar_event_snapshot(session, option, now)
         session.selected_option = option
@@ -367,16 +451,36 @@ class SessionService:
     def configure_channel(
         self,
         session_id: str,
-        listening_enabled: bool,
-        trigger_word: str,
+        listening_enabled: bool | None,
+        trigger_word: str | None,
         reply_format: str | None = None,
+        workday_start_hour: int | None = None,
+        workday_end_hour: int | None = None,
         group_jid: str | None = None,
         group_name: str | None = None,
         group_participant_count: int | None = None,
+        group_participant_ids: list[str] | None = None,
+        coordinator_ids: list[str] | None = None,
     ) -> Session:
         session = self.get(session_id)
-        session.channel_config.listening_enabled = listening_enabled
-        session.channel_config.trigger_word = trigger_word.strip()
+        previous_window = (
+            session.channel_config.workday_start_hour,
+            session.channel_config.workday_end_hour,
+        )
+        previous_roster = (
+            session.channel_config.group_participant_count,
+            tuple(sorted(session.channel_config.group_participant_ids)),
+        )
+        next_start = workday_start_hour if workday_start_hour is not None else previous_window[0]
+        next_end = workday_end_hour if workday_end_hour is not None else previous_window[1]
+        if next_start >= next_end:
+            raise HTTPException(status_code=400, detail="La hora de inicio debe ser anterior a la hora de fin.")
+        if listening_enabled is not None:
+            session.channel_config.listening_enabled = listening_enabled
+        if trigger_word is not None:
+            session.channel_config.trigger_word = trigger_word.strip()
+        session.channel_config.workday_start_hour = next_start
+        session.channel_config.workday_end_hour = next_end
         if reply_format is not None:
             session.channel_config.reply_format = reply_format
         if group_jid is not None:
@@ -390,13 +494,27 @@ class SessionService:
                 session.title = f"WhatsApp - {cleaned_group_name}"
         if group_participant_count is not None:
             session.channel_config.group_participant_count = group_participant_count
+        if group_participant_ids is not None:
+            # WhatsApp no garantiza el orden de los integrantes. Comparar y
+            # persistir un conjunto estable evita invalidar propuestas solo
+            # porque groupMetadata devolvio el mismo padron reordenado.
+            session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
+        if coordinator_ids is not None:
+            session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
+        roster_changed = previous_roster != (
+            session.channel_config.group_participant_count,
+            tuple(sorted(session.channel_config.group_participant_ids)),
+        )
+        if previous_window != (next_start, next_end) or roster_changed:
+            refresh_schedule_state(session)
         session.messages.append(
             ChatMessage(
                 role="system",
                 content=(
                     "Canal configurado: "
-                    f"{'escucha activa' if listening_enabled else 'escucha pausada'}, "
-                    f"invocacion {session.channel_config.trigger_word}."
+                    f"{'escucha activa' if session.channel_config.listening_enabled else 'escucha pausada'}, "
+                    f"invocacion {session.channel_config.trigger_word}, "
+                    f"horario {next_start:02d}:00-{next_end:02d}:00."
                 ),
             )
         )
@@ -408,12 +526,20 @@ class SessionService:
         sender: str,
         text: str,
         external_id: str | None = None,
+        sender_id: str | None = None,
+        sender_aliases: list[str] | None = None,
+        mentioned_jids: list[str] | None = None,
     ) -> tuple[Session, bool]:
         session = self.get(session_id)
+        if session.archived_at or not session.channel_config.listening_enabled:
+            return session, False
         invoked = should_invoke(session, text)
         session.channel_messages.append(
             ChannelMessage(
                 sender=sender.strip(),
+                sender_id=clean_external_id(sender_id),
+                sender_aliases=unique_ids([sender_id or "", *(sender_aliases or [])]),
+                mentioned_jids=unique_ids(mentioned_jids or []),
                 text=text.strip(),
                 detected_invocation=invoked,
                 external_id=external_id,
@@ -421,16 +547,29 @@ class SessionService:
         )
         return repository.save(session), invoked
 
-    def add_channel_messages(self, session_id: str, messages: list[tuple[str, str]]) -> tuple[Session, bool]:
+    def add_channel_messages(
+        self,
+        session_id: str,
+        messages: list[tuple],
+    ) -> tuple[Session, bool]:
         session = self.get(session_id)
+        if session.archived_at or not session.channel_config.listening_enabled:
+            return session, False
         invoked = False
 
-        for sender, text in messages:
+        for item in messages:
+            sender, text = item[0], item[1]
+            sender_id = item[2] if len(item) > 2 else None
+            sender_aliases = item[3] if len(item) > 3 else []
+            mentioned_jids = item[4] if len(item) > 4 else []
             message_invoked = should_invoke(session, text)
             invoked = invoked or message_invoked
             session.channel_messages.append(
                 ChannelMessage(
                     sender=sender.strip(),
+                    sender_id=clean_external_id(sender_id),
+                    sender_aliases=unique_ids([sender_id or "", *(sender_aliases or [])]),
+                    mentioned_jids=unique_ids(mentioned_jids or []),
                     text=text.strip(),
                     detected_invocation=message_invoked,
                 )
@@ -460,6 +599,47 @@ class SessionService:
             )
         )
         session.messages.append(ChatMessage(role="assistant", content=reply, source="channel_simulator"))
+        return repository.save(session)
+
+    def reset_channel_context(self, session_id: str, *, external_id: str | None = None) -> Session:
+        """Inicia otra coordinacion sin destruir el historial auditable del grupo.
+
+        El estado y la respuesta se guardan juntos. Asi un retry del gateway no
+        puede limpiar dos veces ni dejar mensajes nuevos detras de un reset a
+        medio completar.
+        """
+        session = self.get(session_id)
+        session.participants = []
+        session.options = []
+        session.availability_matrix = []
+        session.missing_info = []
+        session.insights = []
+        session.last_processing = None
+        # La revision debe ser monotona durante toda la vida de la sesion. Si
+        # volviera a cero, un comando R1 de una ronda antigua podria confirmar
+        # accidentalmente una propuesta R1 de la coordinacion nueva (ABA).
+        session.proposal_revision += 1
+        session.selected_option = None
+        session.selected_event_date = None
+        session.selected_calendar_event = None
+        session.decision_summary = None
+        session.archived_at = None
+        session.status = "draft"
+
+        reply = build_reset_channel_reply(session)
+        reply_message = ChannelMessage(
+            sender="Agente",
+            text=reply,
+            kind="agent",
+            reply_to_external_id=external_id,
+            reply_format="text",
+        )
+        session.channel_messages.append(reply_message)
+        session.channel_context_message_id = reply_message.id
+        session.last_agent_reply = reply
+        session.messages.append(ChatMessage(role="assistant", content=reply, source="channel_simulator"))
+        if external_id:
+            add_command_receipt(session, external_id, "reset", reply)
         return repository.save(session)
 
     def channel_message_by_external_id(self, session: Session, external_id: str | None) -> ChannelMessage | None:
@@ -501,8 +681,16 @@ class SessionService:
         )
 
     def pending_channel_messages(self, session: Session) -> list[ChannelMessage]:
-        last_agent_index = -1
-        for index, message in enumerate(session.channel_messages):
+        context_index = next(
+            (
+                index
+                for index, message in enumerate(session.channel_messages)
+                if message.id == session.channel_context_message_id
+            ),
+            -1,
+        )
+        last_agent_index = context_index
+        for index, message in enumerate(session.channel_messages[context_index + 1 :], start=context_index + 1):
             if message.kind == "agent":
                 last_agent_index = index
 
@@ -542,12 +730,37 @@ def refresh_schedule_state(session: Session, *, clear_decision: bool = True) -> 
     session.participants = merge_duplicate_participants(session.participants)
     session.missing_info = find_missing_info(session)
     session.availability_matrix = build_availability_matrix(session)
-    session.options = options_from_matrix(session.availability_matrix)
+    previous_options = session.options
+    next_options = options_from_matrix(session.availability_matrix)
+    previous_by_signature = {option_signature(option): option for option in previous_options}
+    for option in next_options:
+        previous = previous_by_signature.get(option_signature(option))
+        if previous:
+            option.id = previous.id
+    if option_signatures(previous_options) != option_signatures(next_options):
+        session.proposal_revision += 1
+    session.options = next_options
     if clear_decision:
         clear_stale_decision(session)
     session.insights = build_insights(session)
     if clear_decision or session.status != "confirmed":
         session.status = "calculated" if session.options else "draft"
+
+
+def option_signature(option: TimeOption) -> tuple:
+    return (
+        option.week_offset,
+        option.day,
+        option.start,
+        option.end,
+        tuple(option.available_participants),
+        tuple(option.unavailable_participants),
+        option.coverage_percent,
+    )
+
+
+def option_signatures(options: list[TimeOption]) -> tuple[tuple, ...]:
+    return tuple(option_signature(option) for option in options)
 
 
 def clear_stale_decision(session: Session) -> None:
@@ -577,11 +790,32 @@ def build_processing_summary(
     cached = "_cache" in source_value or bool(token_usage and token_usage.cached)
     fallback_used = "fallback" in source_value
     has_new_data = participants_detected > 0 or removals_detected > 0
+    quality_flags = list(extraction.quality_flags)
 
-    if "no_new_availability" in source_value:
+    if "ambiguous_mentioned_identity" in quality_flags:
+        confidence = "low"
+        label = "Baja"
+        detail = "La mención no identifica de forma inequívoca a una sola persona; debe reenviarse por separado."
+    elif "third_party_requires_mention" in quality_flags:
+        confidence = "low"
+        label = "Baja"
+        detail = "Se descartó disponibilidad atribuida a otra persona porque no tenía una mención real de WhatsApp."
+    elif "no_new_availability" in source_value:
         confidence = "low"
         label = "Baja"
         detail = "No se detectaron datos nuevos de disponibilidad en los mensajes pendientes."
+    elif "ambiguous_cross_day_range" in quality_flags:
+        confidence = "low"
+        label = "Baja"
+        detail = "Se detecto un rango entre dias que no pudo normalizarse con seguridad; conviene aclararlo."
+    elif "cross_day_range_normalized" in quality_flags:
+        confidence = "medium"
+        label = "Media"
+        detail = "Se expandio un rango entre dias con reglas deterministicas y se validaron sus limites."
+    elif "invalid_interval_discarded" in quality_flags:
+        confidence = "low"
+        label = "Baja"
+        detail = "El extractor devolvio al menos un intervalo temporal incoherente y fue descartado."
     elif has_new_data and not fallback_used:
         confidence = "high"
         label = "Alta"
@@ -604,6 +838,7 @@ def build_processing_summary(
         removals_detected=removals_detected,
         cached=cached,
         fallback_used=fallback_used,
+        quality_flags=quality_flags,
     )
 
 
@@ -613,26 +848,85 @@ def participant_key(name: str) -> str:
     return " ".join(without_accents.split())
 
 
-def find_participant(participants: list[Participant], name: str) -> Participant | None:
+def find_participant(
+    participants: list[Participant],
+    name: str,
+    external_id: str | None = None,
+    external_ids: list[str] | None = None,
+) -> Participant | None:
+    incoming_ids = set(unique_ids([external_id or "", *(external_ids or [])]))
+    if incoming_ids:
+        # Con evidencia técnica, el nombre visible deja de ser una clave. Dos
+        # JIDs distintos llamados igual son dos personas distintas.
+        return next(
+            (
+                participant
+                for participant in participants
+                if incoming_ids.intersection(participant_identity_ids(participant))
+            ),
+            None,
+        )
     key = participant_key(name)
     return next((participant for participant in participants if participant_key(participant.name) == key), None)
 
 
 def merge_duplicate_participants(participants: list[Participant]) -> list[Participant]:
     merged: list[Participant] = []
-    by_key: dict[str, Participant] = {}
-
     for participant in participants:
-        key = participant_key(participant.name)
-        existing = by_key.get(key)
-        if existing:
-            existing.availability = merge_slots(existing.availability, participant.availability)
+        normalize_participant_identity(participant)
+        ids = set(participant_identity_ids(participant))
+        matching = [
+            existing
+            for existing in merged
+            if (
+                ids.intersection(participant_identity_ids(existing))
+                if ids
+                else not participant_identity_ids(existing)
+                and participant_key(existing.name) == participant_key(participant.name)
+            )
+        ]
+        if not matching:
+            merged.append(participant)
             continue
 
-        by_key[key] = participant
-        merged.append(participant)
+        primary = matching[0]
+        primary.availability = merge_slots(primary.availability, participant.availability)
+        merge_participant_identity(primary, ids)
+        # Un registro puente PN/LID puede conectar duplicados históricos que
+        # antes parecían identidades separadas.
+        for duplicate in matching[1:]:
+            primary.availability = merge_slots(primary.availability, duplicate.availability)
+            merge_participant_identity(primary, participant_identity_ids(duplicate))
+            merged.remove(duplicate)
 
     return merged
+
+
+def participant_identity_ids(participant: Participant) -> list[str]:
+    return unique_ids([participant.external_id or "", *participant.external_ids])
+
+
+def is_generated_contact_name(name: str) -> bool:
+    return bool(re.fullmatch(r"Contacto [A-F0-9]{4}", name.strip()))
+
+
+def canonical_external_id(values: list[str]) -> str | None:
+    cleaned = unique_ids(values)
+    if not cleaned:
+        return None
+    return next((value for value in cleaned if value.endswith("@s.whatsapp.net")), cleaned[0])
+
+
+def normalize_participant_identity(participant: Participant) -> None:
+    identities = participant_identity_ids(participant)
+    participant.external_ids = identities
+    participant.external_id = canonical_external_id(identities)
+
+
+def merge_participant_identity(participant: Participant, values: list[str] | set[str]) -> None:
+    identities = unique_ids([*participant_identity_ids(participant), *list(values)])
+    participant.external_ids = identities
+    participant.external_id = canonical_external_id(identities)
 
 
 def should_invoke(session: Session, text: str) -> bool:
@@ -640,7 +934,65 @@ def should_invoke(session: Session, text: str) -> bool:
         return False
 
     trigger = session.channel_config.trigger_word.strip().lower()
-    return bool(trigger and trigger in text.lower())
+    if not trigger:
+        return False
+    pattern = rf"(?<![\w@]){re.escape(trigger)}(?![\w])"
+    return bool(re.search(pattern, text.lower()))
+
+
+def clean_external_id(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().lower()
+    return cleaned or None
+
+
+def unique_ids(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = clean_external_id(value)
+        if cleaned and cleaned not in seen:
+            result.append(cleaned)
+            seen.add(cleaned)
+    return result
+
+
+def validate_slot_in_session_window(session: Session, slot: TimeSlot) -> None:
+    start = time_to_minutes(slot.start)
+    end = time_to_minutes(slot.end)
+    window_start = session.channel_config.workday_start_hour * 60
+    window_end = session.channel_config.workday_end_hour * 60
+    if start < window_start or end > window_end:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "El horario debe estar dentro de la ventana configurada "
+                f"{session.channel_config.workday_start_hour:02d}:00-"
+                f"{session.channel_config.workday_end_hour:02d}:00."
+            ),
+        )
+
+
+def confirmation_blockers(session: Session) -> list[str]:
+    blockers: list[str] = []
+    if session.archived_at:
+        blockers.append("La sesion esta archivada.")
+    if session.missing_info:
+        blockers.append("Falta informacion del grupo antes de confirmar.")
+    processing = session.last_processing
+    identity_flags = set(processing.quality_flags) if processing else set()
+    if "ambiguous_mentioned_identity" in identity_flags:
+        blockers.append("Hay una mención ambigua; reenvíenla mencionando a una sola persona por mensaje.")
+    elif "third_party_requires_mention" in identity_flags:
+        blockers.append("Hay horarios de terceros descartados; reenvíenlos usando una mención real de WhatsApp.")
+    elif processing and (processing.confidence == "low" or processing.fallback_used):
+        blockers.append("La ultima interpretacion debe revisarse o repetirse con el LLM principal.")
+    return blockers
+
+
+def proposal_token(session: Session) -> str:
+    return f"R{session.proposal_revision}"
 
 
 def merge_slots(existing: list[TimeSlot], incoming: list[TimeSlot]) -> list[TimeSlot]:
@@ -719,20 +1071,33 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
     """Mensaje profesional para WhatsApp (usa *negrita* nativa de WhatsApp)."""
     header = _channel_header(session)
     trigger = session.channel_config.trigger_word
+    identity_warning = build_identity_warning(session)
 
     if not session.participants:
+        warning = f"\n\n{identity_warning}" if identity_warning else ""
         return (
             f"{header}\n\n"
-            "Aun no detecto disponibilidades claras.\n"
+            "Aun no detecto disponibilidades claras."
+            f"{warning}\n"
             "Escriban por ejemplo _yo puedo lunes en la tarde_ y vuelvan a invocarme con "
             f"{trigger}."
         )
 
-    count = session.channel_config.group_participant_count or len(session.participants)
     lines = [header]
-    if count:
-        lines.append(f"_{count} participante(s)_")
+    detected_count = len(session.participants)
+    group_count = session.channel_config.group_participant_count
+    if group_count is not None and group_count != detected_count:
+        lines.append(
+            f"_{group_count} integrante(s) actual(es) del grupo · "
+            f"{detected_count} persona(s) con disponibilidad_"
+        )
+    elif group_count is not None:
+        lines.append(f"_{group_count} integrante(s) del grupo con disponibilidad_")
+    elif detected_count:
+        lines.append(f"_{detected_count} persona(s) con disponibilidad_")
     lines.append("")
+    if identity_warning:
+        lines.extend([identity_warning, ""])
 
     if session.options:
         best = session.options[0]
@@ -750,7 +1115,13 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
             for index, option in enumerate(others, start=2):
                 lines.append(_option_line(option, index, now))
         lines.append("")
-        lines.append(f"Para cerrar: escribe *{trigger} confirmar 1*.")
+        blockers = confirmation_blockers(session)
+        if blockers:
+            lines.append("*Aun no se puede confirmar con seguridad*")
+            lines.extend(f"- {item}" for item in blockers)
+        else:
+            revision = f" {proposal_token(session)}" if session.channel_config.group_jid else ""
+            lines.append(f"Para cerrar: escribe *{trigger} confirmar 1{revision}*.")
     else:
         lines.append("Aun no hay una opcion calculable con la informacion disponible.")
 
@@ -763,6 +1134,21 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
     lines.append(f"Comandos: *{trigger} faltan*, *{trigger} exportar*, *{trigger} ayuda*.")
 
     return "\n".join(lines)
+
+
+def build_identity_warning(session: Session) -> str:
+    flags = set(session.last_processing.quality_flags) if session.last_processing else set()
+    if "ambiguous_mentioned_identity" in flags:
+        return (
+            "*No incorporé una disponibilidad ambigua.* "
+            "Mencionen a una sola persona por mensaje, por ejemplo: _@Gabo puede todo el día_."
+        )
+    if "third_party_requires_mention" in flags:
+        return (
+            "*No incorporé horarios escritos a nombre de otra persona sin una mención real.* "
+            "Reenvíenlos seleccionando el contacto en WhatsApp, por ejemplo: _@Gabo puede todo el día_."
+        )
+    return ""
 
 
 def build_confirmed_channel_reply(session: Session, now: datetime | None = None) -> str:
@@ -809,6 +1195,8 @@ def build_help_reply(session: Session) -> str:
             "- _estoy libre mierc de 15:30 a 17:00_",
             "- _no me va bien martes de 10 a 12_",
             "- _hoy despues de las 4_",
+            "- Para informar por otra persona, selecciónenla en WhatsApp: _@Gabo puede todo el día_",
+            "- Mencionen solo a una persona por mensaje.",
             "",
             "*Comandos*",
             f"- *{trigger}*  ·  propone los mejores horarios",
@@ -817,11 +1205,27 @@ def build_help_reply(session: Session) -> str:
             f"- *{trigger} resumen*  ·  estado actual y opciones",
             f"- *{trigger} faltan*  ·  quienes no han dado su horario",
             f"- *{trigger} exportar*  ·  reporte de la sesion",
-            f"- *{trigger} quita a <nombre>*  ·  elimina un participante",
+            f"- *{trigger} quita a @contacto*  ·  elimina exactamente a la persona mencionada",
+            f"- *{trigger} reinicia historial*  ·  comienza otra coordinacion sin usar datos anteriores",
             "",
             "*Formato de respuesta*",
             f"- *{trigger} con imagen*  ·  incluye el calendario grafico",
             f"- *{trigger} solo texto*  ·  sin imagen",
+        ]
+    )
+
+
+def build_reset_channel_reply(session: Session) -> str:
+    return "\n".join(
+        [
+            _channel_header(session),
+            "",
+            "*Nueva coordinacion iniciada*",
+            "No usare participantes, disponibilidades, opciones ni decisiones anteriores.",
+            "El historial previo queda guardado en el panel solo para auditoria.",
+            "",
+            "Escriban sus nuevos horarios y luego invoquen de nuevo con "
+            f"*{session.channel_config.trigger_word}*.",
         ]
     )
 
@@ -1004,23 +1408,31 @@ def build_channel_caption(session: Session) -> str:
 
 
 def last_invoking_text(session: Session) -> str:
-    for message in reversed(session.channel_messages):
-        if message.kind == "human" and message.detected_invocation:
-            return message.text
-    return ""
+    message = last_invoking_message(session)
+    return message.text if message else ""
 
 
 def last_invoking_sender(session: Session) -> str:
-    for message in reversed(session.channel_messages):
-        if message.kind == "human" and message.detected_invocation:
-            return message.sender
-    return "admin"
+    message = last_invoking_message(session)
+    return message.sender if message else "admin"
+
+
+def last_invoking_message(session: Session) -> ChannelMessage | None:
+    return next(
+        (
+            message
+            for message in reversed(session.channel_messages)
+            if message.kind == "human" and message.detected_invocation
+        ),
+        None,
+    )
 
 
 def classify_channel_command(session: Session) -> dict | None:
-    raw = last_invoking_text(session)
-    if not raw:
+    invoking_message = last_invoking_message(session)
+    if not invoking_message:
         return None
+    raw = invoking_message.text
 
     text = _strip_accents(raw)
     trigger = _strip_accents(session.channel_config.trigger_word)
@@ -1029,6 +1441,15 @@ def classify_channel_command(session: Session) -> dict | None:
     if not command_text:
         return None
 
+    reset_with_target = re.search(
+        r"\b(?:reinicia(?:r)?|resetea(?:r)?|restablece(?:r)?|borra(?:r)?|limpia(?:r)?|reset)\b"
+        r".*\b(?:historial|contexto|coordinacion|sesion)\b",
+        command_text,
+    )
+    starts_over = re.search(r"\b(?:nueva coordinacion|empezar de nuevo|partir de cero)\b", command_text)
+    if reset_with_target or starts_over:
+        return {"name": "reset"}
+
     if re.search(r"\b(ayuda|help|comandos|instrucciones)\b", command_text):
         return {"name": "help"}
 
@@ -1036,13 +1457,25 @@ def classify_channel_command(session: Session) -> dict | None:
     if re.search(r"\b(confirmar|confirma|confirmo)\b", command_text) or (
         re.search(r"\b(cerrar|cierra)\b", command_text) and number_token
     ):
+        revision_match = re.search(r"\br\s*(\d+)\b", command_text)
+        revision = int(revision_match.group(1)) if revision_match else None
         if not number_token:
-            return {"name": "confirm", "option_index": 1, "option_label": "1"}
+            return {
+                "name": "confirm",
+                "option_index": 1,
+                "option_label": "1",
+                "proposal_revision": revision,
+            }
 
         option_label = number_token.group(1)
         integer_match = re.fullmatch(r"([+-]?\d+)(?:ra|ro|ta|to)?", option_label)
         option_index = int(integer_match.group(1)) if integer_match else 0
-        return {"name": "confirm", "option_index": option_index, "option_label": option_label}
+        return {
+            "name": "confirm",
+            "option_index": option_index,
+            "option_label": option_label,
+            "proposal_revision": revision,
+        }
 
     if re.search(r"\b(cancelar|cancela|cancelen|anular|anula|deshacer|deshaz)\b", command_text):
         return {"name": "cancel"}
@@ -1057,11 +1490,39 @@ def classify_channel_command(session: Session) -> dict | None:
         return {"name": "summary"}
 
     remove_match = re.search(
-        r"\b(?:quita|quitar|elimina|eliminar|saca|sacar|olvida|olvidar)\s+(?:a\s+)?([a-z0-9_-]{2,80})\b",
+        r"\b(?:quita|quitar|elimina|eliminar|saca|sacar|olvida|olvidar)\s+"
+        r"(?:a\s+)?(?P<mention>@?)(?P<target>[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,7})\s*$",
         command_text,
     )
     if remove_match:
-        return {"name": "remove_participant", "participant_name": remove_match.group(1)}
+        candidate = " ".join(remove_match.group("target").split())
+        mentioned_ids = unique_ids(invoking_message.mentioned_jids)
+        if remove_match.group("mention") != "@" or len(mentioned_ids) != 1:
+            return {
+                "name": "remove_participant",
+                "participant_name": candidate,
+                "requires_mention": True,
+            }
+        target_external_id = mentioned_ids[0]
+        by_identity = find_participant(
+            session.participants,
+            candidate,
+            target_external_id,
+            [target_external_id],
+        )
+        known = next(
+            (
+                participant.name
+                for participant in session.participants
+                if participant_key(participant.name) == participant_key(candidate)
+            ),
+            candidate,
+        )
+        return {
+            "name": "remove_participant",
+            "participant_name": by_identity.name if by_identity else known,
+            "target_external_id": target_external_id,
+        }
 
     return None
 

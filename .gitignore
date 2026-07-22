@@ -8,19 +8,6 @@ backend/data/sessions.json
 frontend/node_modules/
 frontend/dist/
 
-gateway/node_modules/
-gateway/wa-auth/
-
 .env
 backend/.env
-.env.prod
-keys/
-tmp_*.png
 *.log
-
-# Respaldos de produccion y material criptografico nunca van al repo.
-*.cms
-*.cms.sha256
-*.tar.gz
-*.dump
-private-key.pem

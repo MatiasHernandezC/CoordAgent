@@ -56,6 +56,47 @@ def test_parse_legacy_schema_still_works():
     assert _availability(extraction, "Camila") == [("lunes", "15:00", "18:00")]
 
 
+def test_llm_replace_kind_marks_explicit_correction():
+    extraction = parse_extraction_payload(
+        {
+            "entries": [
+                {"person": "Ana", "kind": "replace", "days": ["lunes"], "start": "15:00", "end": "16:00"}
+            ]
+        },
+        "Ana dice que en realidad puede lunes de 15 a 16",
+    )
+    assert extraction.replacements == ["Ana"]
+    assert _availability(extraction, "Ana") == [("lunes", "15:00", "16:00")]
+
+
+def test_del_al_cross_day_range_is_normalized():
+    service = LlmService()
+    extraction = service._extract_with_mock_rules(
+        "Gabo puede del martes a las 3 de la tarde al jueves antes de las 12",
+    )
+    assert _availability(extraction, "Gabo") == [
+        ("martes", "15:00", "18:00"),
+        ("miercoles", "09:00", "18:00"),
+        ("jueves", "09:00", "12:00"),
+    ]
+    assert "cross_day_range_normalized" in extraction.quality_flags
+
+
+def test_negative_cross_day_range_produces_removals_not_positive_availability():
+    service = LlmService()
+    extraction = service._extract_with_mock_rules(
+        "Ana no puede del martes a las 3 de la tarde al jueves antes de las 12",
+    )
+    assert not any(participant.availability for participant in extraction.participants)
+    removal = next(item for item in extraction.removals if item.participant_name == "Ana")
+    assert [(slot.day, slot.start, slot.end) for slot in removal.slots] == [
+        ("martes", "15:00", "18:00"),
+        ("miercoles", "09:00", "18:00"),
+        ("jueves", "09:00", "12:00"),
+    ]
+    assert "cross_day_range_normalized" in extraction.quality_flags
+
+
 def test_parse_new_schema_grounds_hallucinated_people():
     payload = {
         "entries": [
@@ -67,6 +108,32 @@ def test_parse_new_schema_grounds_hallucinated_people():
     extraction = parse_extraction_payload(payload, "Elon puede el lunes")
 
     assert [p.name for p in extraction.participants] == ["Elon"]
+
+
+def test_torneo_cross_day_guard_corrects_invalid_provider_payload():
+    # Salida real observada de Gemini para el mensaje de Torneo. El primer tramo
+    # era imposible y el filtro antiguo borraba el miercoles por no ser literal.
+    payload = {
+        "entries": [
+            {"person": "Gabo", "kind": "available", "days": ["martes"], "start": "15:00", "end": "12:00"},
+            {"person": "Gabo", "kind": "available", "days": ["miercoles"], "start": "09:00", "end": "12:00"},
+            {"person": "Gabo", "kind": "available", "days": ["jueves"], "start": "09:00", "end": "12:00"},
+        ]
+    }
+    extraction = parse_extraction_payload(
+        payload,
+        "- Nicolas: gabo puede desde martes a las 3 de la tarde hasta el jueves antes de las 12",
+    )
+
+    assert _availability(extraction, "Gabo") == [
+        ("martes", "15:00", "18:00"),
+        ("miercoles", "09:00", "18:00"),
+        ("jueves", "09:00", "12:00"),
+    ]
+    assert extraction.quality_flags == [
+        "invalid_interval_discarded",
+        "cross_day_range_normalized",
+    ]
 
 
 def test_parse_keeps_first_person_me_acomoda_and_applies_exception():

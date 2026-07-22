@@ -1,30 +1,38 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   addAvailability,
   archiveSession,
   cancelDecision,
   clearAuth,
+  configureChannel,
   confirmOption,
+  createLlmKey,
   createSession,
+  deleteLlmKey,
   exportCalendar,
   exportSession,
   exportSessionCsv,
   getSavedAuth,
   getOpsStatus,
   getRuntime,
+  listLlmKeys,
   listSessions,
   removeParticipant,
   reopenSession,
   saveAuth,
   sendChannelBatch,
+  testLlmKey,
+  updateLlmKey,
   updateReplyFormat,
   validateLogin,
+  ApiError,
   type AuthCredentials
 } from "./api";
 import { CHANNEL_EXAMPLE } from "./constants";
+import { GeminiKeyPanel } from "./components/GeminiKeyPanel";
 import { getErrorMessage } from "./format";
-import type { Day, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
+import type { Day, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
 const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
 const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
@@ -48,6 +56,7 @@ export function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
+  const [llmKeyState, setLlmKeyState] = useState<LlmKeyListResponse | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -68,8 +77,13 @@ export function App() {
   const [manualDay, setManualDay] = useState<Day>("lunes");
   const [manualStart, setManualStart] = useState("09:00");
   const [manualEnd, setManualEnd] = useState("10:00");
+  const [configListening, setConfigListening] = useState(true);
+  const [configStartHour, setConfigStartHour] = useState(9);
+  const [configEndHour, setConfigEndHour] = useState(18);
   const [busyLabel, setBusyLabel] = useState("");
   const [error, setError] = useState("");
+  const busyRef = useRef(false);
+  const sessionsRequestSequence = useRef(0);
 
   const isBusy = Boolean(busyLabel);
   const adminDigits = adminPhone.replace(/\D/g, "");
@@ -83,7 +97,8 @@ export function App() {
   const readySessionCount = sessions.filter((item) => getSessionQuality(item).tone === "ready").length;
   const confirmedSessionCount = sessions.filter((item) => getSessionQuality(item).tone === "confirmed").length;
   const archivedSessionCount = sessions.filter((item) => item.archived_at).length;
-  const latestMessageCount = session?.channel_messages.length ?? 0;
+  const currentChannelMessages = useMemo(() => (session ? channelMessagesForCurrentContext(session) : []), [session]);
+  const latestMessageCount = currentChannelMessages.length;
   const gateway = opsStatus?.gateway ?? null;
   const botMetricValue = gateway?.connected
     ? "Vinculado"
@@ -106,11 +121,13 @@ export function App() {
   const bestOption = session?.options[0] ?? null;
   const confirmedOption = session?.selected_option ?? null;
   const lastProcessing = session?.last_processing ?? null;
+  const confirmationIssues = session ? getConfirmationBlockers(session) : [];
+  const currentDecisionHistory = session ? decisionHistoryForCurrentContext(session) : [];
   const latestDecision =
-    session && session.decision_history.length > 0
-      ? session.decision_history[session.decision_history.length - 1]
+    currentDecisionHistory.length > 0
+      ? currentDecisionHistory[currentDecisionHistory.length - 1]
       : null;
-  const selectedHistory = useMemo(() => session?.channel_messages.slice(-14) ?? [], [session]);
+  const selectedHistory = useMemo(() => currentChannelMessages.slice(-14), [currentChannelMessages]);
   const visibleSessions = useMemo(
     () => filterSessions(sessions, sessionFilter, sessionSearch),
     [sessions, sessionFilter, sessionSearch]
@@ -138,7 +155,7 @@ export function App() {
       .then((info) => {
         setRuntime(info);
         setAuthState("authenticated");
-        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus()]).catch((err) =>
+        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()]).catch((err) =>
           setError(getErrorMessage(err))
         );
       })
@@ -151,15 +168,26 @@ export function App() {
   useEffect(() => {
     if (authState !== "authenticated" || !autoRefresh) return;
     const intervalId = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus()]).catch((err) =>
-        setError(getErrorMessage(err))
-      );
+      if (document.visibilityState !== "visible" || busyRef.current) return;
+      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()])
+        .then(() => setError(""))
+        .catch((err) => setError(getErrorMessage(err)));
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(intervalId);
   }, [authState, autoRefresh, session?.id]);
 
+  useEffect(() => {
+    if (!session) return;
+    setConfigListening(session.channel_config.listening_enabled);
+    setConfigStartHour(session.channel_config.workday_start_hour);
+    setConfigEndHour(session.channel_config.workday_end_hour);
+    setManualStart(`${String(session.channel_config.workday_start_hour).padStart(2, "0")}:00`);
+    setManualEnd(`${String(Math.min(session.channel_config.workday_start_hour + 1, session.channel_config.workday_end_hour)).padStart(2, "0")}:00`);
+  }, [session?.id, session?.channel_config.workday_start_hour, session?.channel_config.workday_end_hour, session?.channel_config.listening_enabled]);
+
   async function runAction(label: string, action: () => Promise<void>) {
+    busyRef.current = true;
+    sessionsRequestSequence.current += 1;
     setBusyLabel(label);
     setError("");
     setCopied(false);
@@ -172,14 +200,17 @@ export function App() {
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
+      busyRef.current = false;
       setBusyLabel("");
     }
   }
 
   async function refreshSessions(focusSessionId?: string, options: { quiet?: boolean } = {}) {
+    const requestSequence = ++sessionsRequestSequence.current;
     if (!options.quiet) setSessionsLoading(true);
     try {
       const response = await listSessions();
+      if (requestSequence !== sessionsRequestSequence.current) return;
       setSessions(response.sessions);
       const currentId = focusSessionId ?? session?.id ?? "";
       const selected = response.sessions.find((item) => item.id === currentId) ?? response.sessions[0] ?? null;
@@ -195,6 +226,11 @@ export function App() {
     setOpsStatus(response);
   }
 
+  async function refreshLlmKeys() {
+    const response = await listLlmKeys();
+    setLlmKeyState(response);
+  }
+
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     const credentials: AuthCredentials = {
@@ -207,7 +243,7 @@ export function App() {
       saveAuth(credentials);
       setRuntime(info);
       setAuthState("authenticated");
-      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus()]);
+      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()]);
     });
   }
 
@@ -215,6 +251,7 @@ export function App() {
     clearAuth();
     setRuntime(null);
     setOpsStatus(null);
+    setLlmKeyState(null);
     setSession(null);
     setSessions([]);
     setLoginPassword("");
@@ -223,9 +260,50 @@ export function App() {
 
   async function handleRefreshAll() {
     await runAction("Actualizando panel...", async () => {
-      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus()]);
+      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus(), refreshLlmKeys()]);
       setRuntime(info);
     });
+  }
+
+  async function handleCreateLlmKey(name: string, secret: string) {
+    let created = false;
+    await runAction("Cifrando y guardando llave Gemini...", async () => {
+      await createLlmKey(name, secret);
+      const [info] = await Promise.all([getRuntime(), refreshLlmKeys()]);
+      setRuntime(info);
+      created = true;
+    });
+    return created;
+  }
+
+  async function handleUpdateLlmKey(credentialId: string, updates: { name?: string; enabled?: boolean }) {
+    await runAction("Actualizando llave Gemini...", async () => {
+      await updateLlmKey(credentialId, updates);
+      const [info] = await Promise.all([getRuntime(), refreshLlmKeys()]);
+      setRuntime(info);
+    });
+  }
+
+  async function handleTestLlmKey(credentialId: string) {
+    await runAction("Validando llave con Gemini...", async () => {
+      const result = await testLlmKey(credentialId);
+      await refreshLlmKeys();
+      if (!result.ok) {
+        throw new Error("Gemini no aceptó la llave. Revisa su estado en el panel.");
+      }
+      setRuntime(await getRuntime());
+    });
+  }
+
+  async function handleDeleteLlmKey(credentialId: string, confirmName: string) {
+    let deleted = false;
+    await runAction("Eliminando llave Gemini...", async () => {
+      await deleteLlmKey(credentialId, confirmName);
+      const [info] = await Promise.all([getRuntime(), refreshLlmKeys()]);
+      setRuntime(info);
+      deleted = true;
+    });
+    return deleted;
   }
 
   async function handleRunDemo() {
@@ -240,7 +318,7 @@ export function App() {
   }
 
   async function handleChangeReplyFormat(format: ReplyFormat) {
-    if (!session || session.channel_config.reply_format === format) return;
+    if (!session || session.archived_at || session.channel_config.reply_format === format) return;
     await runAction("Actualizando formato...", async () => {
       const response = await updateReplyFormat(session, format);
       setSession(response.session);
@@ -254,11 +332,19 @@ export function App() {
   }
 
   async function handleConfirmOption(optionId: string) {
-    if (!session) return;
+    if (!session || confirmationIssues.length) return;
     await runAction("Confirmando decision...", async () => {
-      const response = await confirmOption(session.id, optionId);
-      setSession(response.session);
-      await refreshSessions(response.session.id);
+      try {
+        const response = await confirmOption(session.id, optionId, session.proposal_revision);
+        setSession(response.session);
+        await refreshSessions(response.session.id);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          await refreshSessions(session.id);
+          throw new Error(`${err.message} Actualice las opciones; revisalas y confirma nuevamente.`);
+        }
+        throw err;
+      }
     });
   }
 
@@ -276,6 +362,24 @@ export function App() {
     const archived = Boolean(session.archived_at);
     await runAction(archived ? "Reabriendo sesion..." : "Archivando sesion...", async () => {
       const response = archived ? await reopenSession(session.id) : await archiveSession(session.id);
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+    });
+  }
+
+  async function handleSaveChannelConfig(event: FormEvent) {
+    event.preventDefault();
+    if (!session || session.archived_at) return;
+    if (configStartHour >= configEndHour) {
+      setError("La hora de inicio debe ser anterior a la hora de fin.");
+      return;
+    }
+    await runAction("Guardando configuracion...", async () => {
+      const response = await configureChannel(session.id, {
+        listening_enabled: configListening,
+        workday_start_hour: configStartHour,
+        workday_end_hour: configEndHour
+      });
       setSession(response.session);
       await refreshSessions(response.session.id);
     });
@@ -310,7 +414,7 @@ export function App() {
   }
 
   async function handleRemoveParticipant(name: string) {
-    if (!session) return;
+    if (!session || session.archived_at) return;
     await runAction(`Quitando ${name}...`, async () => {
       const response = await removeParticipant(session.id, name);
       setSession(response.session);
@@ -320,7 +424,7 @@ export function App() {
 
   async function handleManualAvailability(event: FormEvent) {
     event.preventDefault();
-    if (!session) return;
+    if (!session || session.archived_at) return;
 
     const name = manualName.trim();
     if (!name) {
@@ -451,8 +555,8 @@ export function App() {
         <Metric
           label="Backend"
           value={runtime?.provider_label ?? "Revisando"}
-          detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_configured ? "Gemini activo" : "Sin Gemini"}
-          tone={runtime?.warnings.length || lastProcessing?.confidence === "low" ? "warn" : "ok"}
+          detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_active_key_name ? `Activa: ${runtime.gemini_active_key_name}` : "Sin Gemini"}
+          tone={runtime?.warnings.length || (lastProcessing && lastProcessing.confidence !== "high") ? "warn" : "ok"}
         />
         <Metric label="Seguridad" value="HTTPS" detail="API protegida" tone="ok" />
       </section>
@@ -533,9 +637,10 @@ export function App() {
 
               <div className="facts-grid">
                 <Fact label="Calidad" value={getSessionQuality(session).label} />
-                <Fact label="Participantes WA" value={String(session.channel_config.group_participant_count ?? "N/D")} />
-                <Fact label="Detectados" value={String(session.participants.length)} />
-                <Fact label="Mensajes" value={String(session.channel_messages.length)} />
+                <Fact label="Integrantes actuales" value={String(session.channel_config.group_participant_count ?? "N/D")} />
+                <Fact label="Con disponibilidad" value={String(session.participants.length)} />
+                <Fact label="Revision vigente" value={`R${session.proposal_revision}`} />
+                <Fact label="Mensajes" value={String(latestMessageCount)} />
               </div>
 
               <div className="decision-grid">
@@ -548,7 +653,11 @@ export function App() {
                       </strong>
                       <p>{(confirmedOption ?? bestOption).coverage_percent}% de cobertura</p>
                       <div className="card-actions">
-                        <button type="button" onClick={handleConfirmBest} disabled={isBusy || Boolean(confirmedOption)}>
+                        <button
+                          type="button"
+                          onClick={handleConfirmBest}
+                          disabled={isBusy || Boolean(confirmedOption) || confirmationIssues.length > 0}
+                        >
                           Confirmar
                         </button>
                         <button className="ghost-button compact" type="button" onClick={handleExportCalendar} disabled={isBusy || !confirmedOption}>
@@ -560,11 +669,17 @@ export function App() {
                         <button className="ghost-button compact" type="button" onClick={handleExportCsv} disabled={isBusy}>
                           {csvDownloaded ? "CSV listo" : "CSV"}
                         </button>
-                        <button className="danger-button compact" type="button" onClick={handleCancelDecision} disabled={isBusy || !confirmedOption}>
+                        <button className="danger-button compact" type="button" onClick={handleCancelDecision} disabled={isBusy || !confirmedOption || Boolean(session.archived_at)}>
                           Cancelar
                         </button>
                       </div>
                     </div>
+                    {confirmationIssues.length && !confirmedOption ? (
+                      <div className="empty-state wide">
+                        <strong>Confirmacion protegida</strong>
+                        <p>{confirmationIssues.join(" ")}</p>
+                      </div>
+                    ) : null}
                     <div className="decision-card">
                       <span>Asisten</span>
                       <p>{(confirmedOption ?? bestOption).available_participants.join(", ") || "Sin participantes claros"}</p>
@@ -604,7 +719,7 @@ export function App() {
                             className={selected ? "ghost-button compact" : "compact"}
                             type="button"
                             onClick={() => handleConfirmOption(option.id)}
-                            disabled={isBusy || selected}
+                            disabled={isBusy || selected || confirmationIssues.length > 0}
                           >
                             {selected ? "Confirmada" : "Confirmar"}
                           </button>
@@ -647,7 +762,7 @@ export function App() {
                     Fin
                     <input type="time" step="3600" value={manualEnd} onChange={(event) => setManualEnd(event.target.value)} />
                   </label>
-                  <button type="submit" disabled={isBusy || !manualName.trim()}>
+                  <button type="submit" disabled={isBusy || !manualName.trim() || Boolean(session.archived_at)}>
                     Agregar horario
                   </button>
                 </form>
@@ -663,7 +778,7 @@ export function App() {
                           className="ghost-button compact"
                           type="button"
                           onClick={() => handleRemoveParticipant(participant.name)}
-                          disabled={isBusy}
+                          disabled={isBusy || Boolean(session.archived_at)}
                         >
                           Quitar
                         </button>
@@ -741,6 +856,60 @@ export function App() {
         </section>
 
         <aside className="side-stack">
+          <GeminiKeyPanel
+            state={llmKeyState}
+            busy={isBusy}
+            onCreate={handleCreateLlmKey}
+            onUpdate={handleUpdateLlmKey}
+            onTest={handleTestLlmKey}
+            onDelete={handleDeleteLlmKey}
+          />
+
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <span>Coordinacion</span>
+                <strong>Ventana horaria</strong>
+              </div>
+            </div>
+            {session ? (
+              <form className="form-grid" onSubmit={handleSaveChannelConfig}>
+                <label>
+                  Desde
+                  <select value={configStartHour} onChange={(event) => setConfigStartHour(Number(event.target.value))}>
+                    {Array.from({ length: 23 }, (_, hour) => (
+                      <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Hasta
+                  <select value={configEndHour} onChange={(event) => setConfigEndHour(Number(event.target.value))}>
+                    {Array.from({ length: 23 }, (_, index) => index + 1).map((hour) => (
+                      <option key={hour} value={hour}>{String(hour).padStart(2, "0")}:00</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={configListening}
+                    onChange={(event) => setConfigListening(event.target.checked)}
+                  />
+                  Escuchar mensajes nuevos
+                </label>
+                <button type="submit" disabled={isBusy || Boolean(session.archived_at) || configStartHour >= configEndHour}>
+                  Guardar limites
+                </button>
+                <small>
+                  El LLM interpreta el lenguaje; las propuestas se limitan a {String(configStartHour).padStart(2, "0")}:00-{String(configEndHour).padStart(2, "0")}:00.
+                </small>
+              </form>
+            ) : (
+              <div className="empty-state">Sin sesion seleccionada.</div>
+            )}
+          </section>
+
           <section className="panel">
             <div className="panel-head">
               <div>
@@ -753,7 +922,7 @@ export function App() {
                 {REPLY_FORMATS.map((option) => (
                   <button
                     className={session.channel_config.reply_format === option.value ? "format-button active" : "format-button"}
-                    disabled={isBusy}
+                    disabled={isBusy || Boolean(session.archived_at)}
                     key={option.value}
                     type="button"
                     onClick={() => handleChangeReplyFormat(option.value)}
@@ -778,14 +947,16 @@ export function App() {
             <div className="command-list">
               <code>@coordina</code>
               <span>actualiza opciones con mensajes nuevos</span>
-              <code>@coordina confirmar 1</code>
-              <span>cierra la mejor alternativa</span>
+              <code>@coordina confirmar 1 {session ? `R${session.proposal_revision}` : "R..."}</code>
+              <span>cierra la alternativa de la revision mostrada</span>
               <code>@coordina faltan</code>
               <span>lista pendientes por persona</span>
               <code>@coordina exportar</code>
               <span>envia reporte textual</span>
               <code>@coordina quitar Ana</code>
               <span>corrige participantes mal detectados</span>
+              <code>@coordina reinicia historial</code>
+              <span>inicia otra coordinacion desde cero</span>
             </div>
           </section>
 
@@ -922,6 +1093,11 @@ function getSessionQuality(session: Session): { tone: SessionQuality; label: str
     return { tone: "review", label: "Revisar", detail: `${session.missing_info.length} pendiente(s)` };
   }
 
+  const blockers = getConfirmationBlockers(session);
+  if (blockers.length > 0) {
+    return { tone: "review", label: "Revisar", detail: blockers[0] };
+  }
+
   if (session.options.length > 0) {
     return { tone: "ready", label: "Lista", detail: "Puede confirmarse" };
   }
@@ -931,6 +1107,16 @@ function getSessionQuality(session: Session): { tone: SessionQuality; label: str
   }
 
   return { tone: "empty", label: "Sin datos", detail: "Aun sin disponibilidad" };
+}
+
+function getConfirmationBlockers(session: Session): string[] {
+  const blockers: string[] = [];
+  if (session.archived_at) blockers.push("La sesion esta archivada.");
+  if (session.missing_info.length > 0) blockers.push("Falta informacion del grupo antes de confirmar.");
+  if (session.last_processing && (session.last_processing.confidence === "low" || session.last_processing.fallback_used)) {
+    blockers.push("La ultima interpretacion debe revisarse o repetirse con el LLM principal.");
+  }
+  return blockers;
 }
 
 function normalizeSearch(value: string) {
@@ -945,9 +1131,24 @@ function sessionDisplayName(session: Session) {
 }
 
 function lastHumanMessage(session: Session) {
-  const message = [...session.channel_messages].reverse().find((item) => item.kind === "human");
+  const message = [...channelMessagesForCurrentContext(session)].reverse().find((item) => item.kind === "human");
   if (!message) return null;
   return `${message.sender}: ${message.text}`;
+}
+
+function channelMessagesForCurrentContext(session: Session) {
+  if (!session.channel_context_message_id) return session.channel_messages;
+  const contextIndex = session.channel_messages.findIndex((item) => item.id === session.channel_context_message_id);
+  return contextIndex >= 0 ? session.channel_messages.slice(contextIndex) : session.channel_messages;
+}
+
+function decisionHistoryForCurrentContext(session: Session) {
+  if (!session.channel_context_message_id) return session.decision_history;
+  const boundary = session.channel_messages.find((item) => item.id === session.channel_context_message_id)?.created_at;
+  if (!boundary) return session.decision_history;
+  const boundaryTime = new Date(boundary).getTime();
+  if (Number.isNaN(boundaryTime)) return session.decision_history;
+  return session.decision_history.filter((item) => new Date(item.created_at).getTime() >= boundaryTime);
 }
 
 function formatTimestamp(value: string) {
@@ -1052,7 +1253,7 @@ function SessionButton({
         <span className={`quality-chip ${quality.tone}`}>{quality.label}</span>
       </span>
       <span className="session-meta">
-        {item.channel_config.group_jid ? "Grupo" : "Prueba"} - {item.channel_messages.length} mensajes - {quality.detail}
+        {item.channel_config.group_jid ? "Grupo" : "Prueba"} - {channelMessagesForCurrentContext(item).length} mensajes - {quality.detail}
       </span>
       <span className="session-last">{lastHumanMessage(item) ?? "Sin historial del canal"}</span>
     </button>

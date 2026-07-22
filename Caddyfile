@@ -18,7 +18,11 @@
 		basic_auth {
 			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
 		}
-		reverse_proxy backend:8000
+		reverse_proxy backend:8000 {
+			# Caddy sobrescribe este header despues de validar Basic Auth. El
+			# backend lo exige para las rutas que administran secretos.
+			header_up X-Coordina-Admin {http.auth.user.id}
+		}
 	}
 	handle /health {
 		basic_auth {

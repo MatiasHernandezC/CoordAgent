@@ -1,199 +1,203 @@
-# Coordina WhatsApp MVP
+# Coordinador Simple MVP
 
-Panel y bot liviano para coordinar horarios desde grupos de WhatsApp. El sistema
-escucha mensajes del grupo, extrae disponibilidad con un LLM, calcula las mejores
-opciones y responde con texto y, opcionalmente, una imagen/calendario.
+Version simplificada del proyecto de decision grupal para un equipo de 2 desarrolladores.
 
-Estado actual del MVP:
+La idea del MVP es simple:
 
-1. Panel web React para administrar sesiones y grupos.
-2. Login simple en el frontend y Basic Auth en Caddy para proteger `/api/*`.
-3. Backend FastAPI con repositorio PostgreSQL en produccion y JSON para tests.
-4. Gateway WhatsApp basado en Baileys, con una sesion automatica por grupo.
-5. Gemini `gemini-2.5-flash-lite` como extractor principal, con cache, cooldown y fallback por reglas.
-6. Motor Python que calcula matriz de disponibilidad, cobertura y mejores horarios.
-7. Respuesta configurable: solo texto, solo imagen o texto + imagen.
-8. Comandos operativos desde WhatsApp para confirmar, exportar, revisar pendientes y corregir participantes.
-9. Panel con trazabilidad de procesamiento, historial de decisiones y reporte descargable.
-10. Cola persistente e idempotencia por ID de WhatsApp para reintentar sin duplicar decisiones.
-11. Healthchecks, rotacion de logs, respaldo cifrado y monitor systemd del droplet.
+1. El usuario escribe disponibilidades en lenguaje natural.
+2. Un LLM convierte ese texto en JSON estructurado.
+3. Un motor Python cruza horarios.
+4. El sistema muestra faltantes, cobertura y explicacion de cada opcion.
+5. El usuario puede corregir datos manualmente.
+6. El usuario confirma una opcion.
 
-## Mejoras Operativas
-
-Comandos soportados en grupos:
-
-```txt
-@coordina
-@coordina confirmar 1
-@coordina faltan
-@coordina exportar
-@coordina quitar Ana
-```
-
-El backend distingue estos comandos antes de llamar al LLM. Asi se ahorran tokens
-y se evitan efectos raros cuando el administrador solo quiere cerrar una opcion
-o pedir un reporte. Cada confirmacion queda guardada en `decision_history` con
-origen (`panel`, `whatsapp` o `api`), autor y snapshot de la opcion elegida.
-
-Cada extraccion tambien guarda `last_processing`, un resumen liviano con fuente,
-confianza, cache/fallback y cantidad de participantes/remociones detectadas. Esto
-ayuda a saber si una respuesta vino de Gemini, cache o reglas de respaldo.
-
-## Arquitectura Rapida
+## Arquitectura
 
 ```mermaid
-flowchart LR
-  Admin["Administrador"] --> UI["Frontend React"]
-  UI --> Edge["Caddy HTTPS + Basic Auth en API"]
-  Edge --> API["FastAPI BFF"]
-  API --> DB["PostgreSQL"]
-  API --> Gemini["Gemini API"]
-  API --> Rules["Fallback por reglas"]
-  API --> Img["Render PNG calendario"]
-
-  Group["Grupo WhatsApp"] <--> Gateway["Gateway Baileys"]
-  Gateway --> API
+flowchart TD
+  A["Frontend React + TypeScript"] --> B["FastAPI BFF"]
+  B --> C["LLM Service"]
+  B --> D["Decision Engine Python"]
+  B --> E["Repositorio (Postgres / JSON)"]
 ```
-
-Mas detalle: [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
 
 ## Carpetas
 
 ```txt
 coordinador-simple-mvp/
-+-- backend/       FastAPI, servicios, schemas, repositorios y tests
-+-- frontend/      React + TypeScript, panel administrativo
-+-- gateway/       Cliente WhatsApp/Baileys
-+-- docs/          Arquitectura, despliegue y configuracion LLM
-+-- Caddyfile      HTTPS, headers y proxy del dominio publico
-+-- docker-compose.prod.yml
++-- backend/
+|   +-- app/
+|   |   +-- main.py
+|   |   +-- schemas.py
+|   |   +-- bff/routes.py
+|   |   +-- services/
+|   |   +-- storage/
+|   |   +-- prompts/
+|   +-- data/sessions.json
+|   +-- requirements.txt
+|   +-- .env.example
++-- frontend/
+|   +-- src/
+|   +-- package.json
++-- docs/
 ```
 
-## Ejecutar Local
+## Ejecutar Backend
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+uvicorn app.main:app --reload --port 8000
+```
 
 Backend:
 
-```powershell
-cd backend
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:PYTHONPATH="."
-$env:DB_BACKEND="json"
-$env:LLM_PROVIDER="mock"
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```txt
+http://localhost:8000
 ```
 
-Frontend:
+> Sin `backend/.env` se usan los defaults de `settings.py` (que asumen Postgres).
+> Para correr sin base de datos, pon `DB_BACKEND=json` en el `.env` (ver siguiente seccion).
 
-```powershell
+## Ejecutar Frontend
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-URLs locales:
+Frontend:
 
 ```txt
-Frontend: http://127.0.0.1:5173
-Backend:  http://127.0.0.1:8000
-Health:   http://127.0.0.1:8000/health
-Runtime:  http://127.0.0.1:8000/api/runtime
+http://127.0.0.1:5173
 ```
 
-Docker local:
+## Base de datos y almacenamiento
 
-```powershell
+El backend persiste las sesiones a traves de un repositorio seleccionable con la
+variable `DB_BACKEND`:
+
+```txt
+DB_BACKEND=postgres   # por defecto: guarda cada sesion como JSONB en PostgreSQL
+DB_BACKEND=json       # respaldo sin dependencias: data/sessions.json
+```
+
+- `postgres` requiere una base viva en `DATABASE_URL`. La tabla `sessions` se crea
+  sola en el primer uso (sin migraciones). Ejemplo local:
+  `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/meetingdb`.
+- `json` no necesita nada instalado; util para demos y para correr los tests.
+- Con `DATA_FILE` puedes fijar una ruta absoluta para el JSON (si no, es relativa
+  al directorio desde donde lanzas uvicorn).
+
+## Ejecutar con Docker
+
+`docker-compose.yml` levanta los tres servicios (PostgreSQL + backend + frontend)
+ya conectados entre si:
+
+```bash
 docker compose up --build
 ```
 
-## Produccion
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+- PostgreSQL: `localhost:5432` (usuario/clave/base `postgres` / `postgres` / `meetingdb`)
 
-Produccion usa `docker-compose.prod.yml`:
+El backend queda con `DB_BACKEND=postgres` y `LLM_PROVIDER=mock`. Para usar IA real,
+cambia en el compose `LLM_PROVIDER=gemini` y agrega `GEMINI_API_KEY`.
 
-- `caddy`: publica 80/443, TLS automatico y Basic Auth para API.
-- `frontend`: build estatico servido por nginx interno.
-- `backend`: FastAPI sin puerto publico directo.
-- `db`: PostgreSQL privado en la red Docker.
-- `gateway`: WhatsApp/Baileys con credenciales persistidas en volumen `waauth`.
+## LLM local recomendado
 
-Guias:
-
-- [Despliegue WhatsApp](docs/DESPLIEGUE_WHATSAPP.md)
-- [Operacion de produccion](docs/OPERACION_PRODUCCION.md)
-- [Respaldo y recuperacion](docs/BACKUP_RECOVERY.md)
-
-Variables clave de `.env.prod`:
+Por defecto el backend usa el proveedor local:
 
 ```txt
-PUBLIC_DOMAIN=coordina.xshift007.com
-PUBLIC_URL=https://coordina.xshift007.com
-BASIC_AUTH_USER=coordina
-BASIC_AUTH_HASH=...
-POSTGRES_PASSWORD=...
+LLM_PROVIDER=local
+LOCAL_LLM_MODEL=qwen
+```
+
+Ese modo llama al script:
+
+```txt
+C:\Users\cocan\Downloads\(Ultimos ramos)\TAVI\local_llm.py
+```
+
+Modelo recomendado para la demo:
+
+```txt
+Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+```
+
+Motivo: entiende mejor conversaciones desordenadas que los modelos chicos y es mas conveniente para extraer participantes, dias y restricciones. Si quieres comparar con Phi:
+
+```txt
+LOCAL_LLM_MODEL=phi
+```
+
+Para desarrollo rapido sin cargar modelos, puedes volver al extractor por reglas:
+
+```txt
+LLM_PROVIDER=mock
+```
+
+Para usar Gemini API, crea o edita `backend/.env` y usa:
+
+```txt
 LLM_PROVIDER=gemini
-GEMINI_API_KEY=...
+GEMINI_API_KEY=tu_api_key
 GEMINI_MODEL=gemini-2.5-flash-lite
-TRIGGER_WORD=@coordina
-BOT_PHONE_NUMBER=...
+GEMINI_COOLDOWN_SECONDS=60
 ```
 
-No subas `.env.prod`, credenciales de WhatsApp ni archivos dentro de `keys/`.
+El backend llama a `generateContent`, solicita salida `application/json` y valida el resultado con el mismo esquema usado por Qwen/Ollama. Si falta la key o la API falla, vuelve al extractor `mock_fallback` para que la demo no quede inutilizable.
 
-## LLM
+Para no consumir cuota de Gemini durante pruebas repetidas, usa `LLM_PROVIDER=mock` o `LLM_PROVIDER=local`. Si la API responde `429`, el backend entra en cooldown y deja de insistir por unos segundos.
 
-La separacion tecnica es intencional:
+Cuando Gemini responde bien, la app muestra tokens y costo aproximado de la ultima llamada y el total acumulado de la sesion. Las llamadas servidas desde cache cuentan como `0 tokens`.
+
+Para obligar a usar Gemini real durante una prueba:
 
 ```txt
-LLM = interpreta mensajes y devuelve JSON.
-Python = cruza horarios y calcula opciones.
-Administrador = confirma y corrige cuando hace falta.
+LLM_PROVIDER=gemini
+GEMINI_MODEL=gemini-2.5-flash-lite
+LLM_FALLBACK_ENABLED=false
+LLM_CACHE_ENABLED=false
 ```
 
-Para el droplet se recomienda `gemini-2.5-flash-lite`: la tarea principal es
-extraccion corta, de bajo costo y baja latencia. Si Gemini falla por cuota o
-disponibilidad, el backend puede volver a un extractor por reglas para no romper
-la demo.
+Para usar Ollama local:
 
-Detalle: [docs/CONFIGURACION_LLM.md](docs/CONFIGURACION_LLM.md).
+```txt
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.1
+OLLAMA_URL=http://localhost:11434/api/chat
+```
 
-## Pruebas
+El LLM solo extrae datos desde lenguaje natural. No calcula ni confirma decisiones; eso queda en el motor Python.
+
+La interfaz muestra el provider real activo en la tarjeta superior. Tambien puedes verlo por API:
 
 ```powershell
-$env:PYTHONPATH="backend"
-backend\.venv\Scripts\python.exe -m pytest backend\tests -q
-node --check gateway\src\index.js
-npm --prefix frontend run build
+Invoke-RestMethod http://127.0.0.1:8000/api/runtime
 ```
 
-Cobertura funcional importante:
+Mas detalle: `docs/CONFIGURACION_LLM.md`.
 
-- Extraccion de disponibilidad y remociones.
-- Guardrails contra prompt injection y ruido.
-- Flujo de canal WhatsApp simulado.
-- Formatos de respuesta `text`, `image`, `both`.
-- Repositorio JSON/PostgreSQL y validaciones de API.
+## Rendimiento de la demo
 
-## Operacion Rapida
+- `Cargar conversacion ejemplo` usa un endpoint batch para enviar todos los mensajes en una sola llamada.
+- Las respuestas LLM repetidas se cachean en memoria si `LLM_CACHE_ENABLED=true`.
+- Si `LLM_FALLBACK_ENABLED=true` y el provider configurado falla, el backend vuelve a `mock_fallback` para no romper la demo.
+- Si no existe `backend/.env`, no estas seleccionando explicitamente nube/local/mock; se usaran los defaults de `settings.py`.
 
-En el droplet:
+## Valor visible del MVP
 
-```bash
-cd /opt/coordinador-simple-mvp
-docker compose -f docker-compose.prod.yml --env-file .env.prod ps
-docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f backend gateway
-docker stats --no-stream
-```
-
-Validar desde una maquina externa:
-
-```powershell
-curl.exe -I https://coordina.xshift007.com
-curl.exe -s -o NUL -w "%{http_code}" https://coordina.xshift007.com/api/runtime
-curl.exe -s -o NUL -w "%{http_code}" https://coordina.xshift007.com/.env
-```
-
-Esperado:
-
-- `/` responde el frontend.
-- `/api/runtime` sin credenciales responde `401`.
-- `/.env` responde `404`.
+- Muestra que datos entendio el LLM.
+- Expone participantes sin disponibilidad.
+- Mantiene historial de mensajes e interpretaciones.
+- Genera un mapa de disponibilidad por dia y hora.
+- Permite corregir o agregar horarios manualmente.
+- Calcula las 3 mejores opciones.
+- Explica cobertura, asistentes y participantes que no calzan.
+- Genera un resumen final al confirmar.

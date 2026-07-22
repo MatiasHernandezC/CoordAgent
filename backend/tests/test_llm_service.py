@@ -1,10 +1,17 @@
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 
+import app.services.llm_service as llm_module
 from app.schemas import AvailabilityRemoval, ExtractedAvailability, Participant, TimeSlot
 from app.services.llm_service import (
     LlmUnavailableError,
     LlmService,
     build_channel_extraction_text,
+    build_gemini_stream_url,
     current_workday_name,
     estimate_gemini_cost,
     extract_gemini_text,
@@ -252,6 +259,35 @@ def test_channel_invocation_with_noise_has_no_scheduling_signal():
     assert extraction.removals == []
 
 
+def test_channel_keeps_duplicate_display_names_as_distinct_whatsapp_identities(monkeypatch):
+    monkeypatch.setattr(settings, "llm_provider", "mock")
+    monkeypatch.setattr(settings, "llm_cache_enabled", False)
+    service = LlmService()
+
+    extraction, source, _ = service.extract_channel_availability(
+        [
+            ChannelMessage(
+                sender="Alex",
+                sender_id="alex-one@wa",
+                text="yo puedo lunes todo el dia",
+            ),
+            ChannelMessage(
+                sender="Alex",
+                sender_id="alex-two@wa",
+                text="yo puedo martes todo el dia",
+            ),
+            ChannelMessage(sender="Admin", sender_id="admin@wa", text="@coordina"),
+        ]
+    )
+
+    assert source == "channel_mock"
+    assert [(item.name, item.external_id) for item in extraction.participants] == [
+        ("Alex", "alex-one@wa"),
+        ("Alex", "alex-two@wa"),
+    ]
+    assert [item.availability[0].day for item in extraction.participants] == ["lunes", "martes"]
+
+
 def test_mock_extractor_handles_indirect_reported_availability():
     original_provider = settings.llm_provider
     original_cache = settings.llm_cache_enabled
@@ -326,7 +362,11 @@ def test_channel_extracts_indirect_availability_from_one_sender():
 
         extraction, source, token_usage = service.extract_channel_availability(
             [
-                ChannelMessage(sender="Yuli", text="ana dijo que podia el jueves pero a la 11am"),
+                ChannelMessage(
+                    sender="Yuli",
+                    text="@ana dijo que podia el jueves pero a la 11am",
+                    mentioned_jids=["56911111111@s.whatsapp.net"],
+                ),
                 ChannelMessage(sender="Yuli", text="@coordina"),
             ]
         )
@@ -351,7 +391,11 @@ def test_channel_extracts_participant_without_time_from_participation_phrase():
 
         extraction, source, token_usage = service.extract_channel_availability(
             [
-                ChannelMessage(sender="Yuli", text="ana tambien va a participar"),
+                ChannelMessage(
+                    sender="Yuli",
+                    text="@ana tambien va a participar",
+                    mentioned_jids=["56911111111@s.whatsapp.net"],
+                ),
                 ChannelMessage(sender="Yuli", text="@coordina"),
             ]
         )
@@ -387,13 +431,17 @@ def test_channel_uses_today_context_for_following_time_only_message(monkeypatch)
     transcript = build_channel_extraction_text(
         [
             ChannelMessage(sender="Nicolas", text="Podriamos juntarnos hoy"),
-            ChannelMessage(sender="Nicolas", text="Daniel puede a las 2"),
+            ChannelMessage(
+                sender="Nicolas",
+                text="@Daniel puede a las 2",
+                mentioned_jids=["56922222222@s.whatsapp.net"],
+            ),
             ChannelMessage(sender="Nicolas", text="@coordina"),
         ]
     )
 
     assert "Podriamos juntarnos martes" in transcript
-    assert "Daniel puede a las 2 martes" in transcript
+    assert "puede a las 2 martes" in transcript
 
 
 def test_channel_extracts_time_only_availability_with_today_context(monkeypatch):
@@ -410,7 +458,11 @@ def test_channel_extracts_time_only_availability_with_today_context(monkeypatch)
         extraction, source, token_usage = service.extract_channel_availability(
             [
                 ChannelMessage(sender="Nicolas", text="Podriamos juntarnos hoy"),
-                ChannelMessage(sender="Nicolas", text="Daniel puede a las 2"),
+                ChannelMessage(
+                    sender="Nicolas",
+                    text="@Daniel puede a las 2",
+                    mentioned_jids=["56922222222@s.whatsapp.net"],
+                ),
                 ChannelMessage(sender="Nicolas", text="@coordina"),
             ]
         )
@@ -571,6 +623,148 @@ def test_gemini_text_extraction_reads_candidate_parts():
     }
 
     assert '"participants"' in extract_gemini_text(raw)
+
+
+def test_gemini_stream_measures_real_first_content_chunk(monkeypatch):
+    response_text = json.dumps(
+        {
+            "participants": [
+                {
+                    "name": "Ana",
+                    "availability": [{"day": "lunes", "start": "09:00", "end": "10:00"}],
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    split_at = len(response_text) // 2
+    chunks = [
+        {"candidates": [{"content": {"parts": [{"text": response_text[:split_at]}]}}]},
+        {
+            "candidates": [{"content": {"parts": [{"text": response_text[split_at:]}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 12,
+                "candidatesTokenCount": 5,
+                "totalTokenCount": 17,
+            },
+        },
+    ]
+    lines = []
+    for chunk in chunks:
+        lines.extend([f"data: {json.dumps(chunk, ensure_ascii=False)}\n".encode(), b"\n"])
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            return iter(lines)
+
+    requested_urls = []
+
+    def fake_urlopen(request, timeout):
+        requested_urls.append((request.full_url, timeout))
+        return FakeResponse()
+
+    timer = iter([10.0, 10.245])
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(llm_module.time, "perf_counter", lambda: next(timer))
+    monkeypatch.setattr(settings, "gemini_streaming_enabled", True)
+    monkeypatch.setattr(settings, "gemini_url", "https://example.test/models/{model}:generateContent")
+
+    extraction, usage = LlmService()._extract_with_gemini(
+        "Ana puede el lunes de 09:00 a 10:00",
+        9,
+        18,
+        api_key="AIza-test-only",
+    )
+
+    assert extraction.participants[0].name == "Ana"
+    assert usage.total_tokens == 17
+    assert usage.time_to_first_token_ms == 245
+    assert requested_urls == [
+        (f"https://example.test/models/{settings.gemini_model}:streamGenerateContent?alt=sse", settings.gemini_timeout_seconds)
+    ]
+
+
+def test_gemini_stream_url_preserves_existing_query():
+    assert build_gemini_stream_url("https://example.test/model:generateContent?key=value") == (
+        "https://example.test/model:streamGenerateContent?key=value&alt=sse"
+    )
+
+
+def test_gemini_stream_over_real_http_finishes_after_ttft(monkeypatch):
+    response_text = json.dumps(
+        {
+            "participants": [
+                {
+                    "name": "Ana",
+                    "availability": [{"day": "lunes", "start": "09:00", "end": "10:00"}],
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    split_at = len(response_text) // 2
+
+    class StreamingHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            assert ":streamGenerateContent" in self.path
+            assert "alt=sse" in self.path
+            assert self.headers.get("x-goog-api-key") == "AIza-local-stream-test"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            first = {"candidates": [{"content": {"parts": [{"text": response_text[:split_at]}]}}]}
+            self.wfile.write(f"data: {json.dumps(first, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+            time.sleep(0.15)
+            final = {
+                "candidates": [{"content": {"parts": [{"text": response_text[split_at:]}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 12,
+                    "candidatesTokenCount": 5,
+                    "totalTokenCount": 17,
+                },
+            }
+            self.wfile.write(f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StreamingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(settings, "gemini_streaming_enabled", True)
+    monkeypatch.setattr(
+        settings,
+        "gemini_url",
+        f"http://127.0.0.1:{server.server_port}/v1beta/models/{{model}}:generateContent",
+    )
+    monkeypatch.setattr(settings, "gemini_timeout_seconds", 2)
+
+    try:
+        started = time.perf_counter()
+        extraction, usage = LlmService()._extract_with_gemini(
+            "Ana puede el lunes de 09:00 a 10:00",
+            9,
+            18,
+            api_key="AIza-local-stream-test",
+        )
+        total_ms = round((time.perf_counter() - started) * 1000)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert extraction.participants[0].name == "Ana"
+    assert usage.time_to_first_token_ms is not None
+    assert total_ms - usage.time_to_first_token_ms >= 100
 
 
 def test_gemini_provider_falls_back_without_api_key():

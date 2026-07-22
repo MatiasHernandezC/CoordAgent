@@ -46,10 +46,18 @@ _DAY_ALIASES = {
 _ALL_DAY_TOKENS = {"todos", "all", "todos los dias", "cualquier dia", "cualquiera"}
 
 
-def compile_interpretation(interpretation: ScheduleInterpretation) -> ExtractedAvailability:
+def compile_interpretation(
+    interpretation: ScheduleInterpretation,
+    workday_start: int = WORKDAY_START,
+    workday_end: int = WORKDAY_END,
+) -> ExtractedAvailability:
+    if not 0 <= workday_start < workday_end <= 23:
+        raise ValueError("Ventana horaria invalida")
     participants: dict[str, Participant] = {}
     removals: dict[str, AvailabilityRemoval] = {}
     implied: dict[str, ImpliedAvailability] = {}
+    replacements: list[str] = []
+    quality_flags: list[str] = []
 
     for entry in interpretation.entries:
         person = entry.person.strip()
@@ -60,41 +68,47 @@ def compile_interpretation(interpretation: ScheduleInterpretation) -> ExtractedA
         if not days:
             continue
 
-        hours = _normalize_hours(entry.start, entry.end)
+        hours = _normalize_hours(entry.start, entry.end, workday_start, workday_end)
         if hours is None:
+            if "invalid_interval_discarded" not in quality_flags:
+                quality_flags.append("invalid_interval_discarded")
             continue
         start_hour, end_hour = hours
         has_explicit_hours = _has_explicit_hours(entry.start, entry.end)
         week = _normalize_week_offset(entry.week_offset)
 
-        if entry.kind == "available":
+        if entry.kind in {"available", "replace"}:
             _add_slots(_participant_for(participants, person).availability, days, start_hour, end_hour, week)
+            if entry.kind == "replace" and person not in replacements:
+                replacements.append(person)
 
         elif entry.kind == "unavailable":
             _add_slots(_removal_for(removals, person).slots, days, start_hour, end_hour, week)
             # Complemento pragmatico solo si la no-disponibilidad es parcial.
-            if has_explicit_hours and (start_hour > WORKDAY_START or end_hour < WORKDAY_END):
+            if has_explicit_hours and (start_hour > workday_start or end_hour < workday_end):
                 target = _implied_for(implied, person)
-                if start_hour > WORKDAY_START:
-                    _add_slots(target.slots, days, WORKDAY_START, start_hour, week)
-                if end_hour < WORKDAY_END:
-                    _add_slots(target.slots, days, end_hour, WORKDAY_END, week)
+                if start_hour > workday_start:
+                    _add_slots(target.slots, days, workday_start, start_hour, week)
+                if end_hour < workday_end:
+                    _add_slots(target.slots, days, end_hour, workday_end, week)
 
         elif entry.kind == "only":
             _add_slots(_participant_for(participants, person).availability, days, start_hour, end_hour, week)
             removal = _removal_for(removals, person)
             other_days = [day for day in WEEKDAYS if day not in days]
-            _add_slots(removal.slots, other_days, WORKDAY_START, WORKDAY_END, week)
+            _add_slots(removal.slots, other_days, workday_start, workday_end, week)
             if has_explicit_hours:
-                if start_hour > WORKDAY_START:
-                    _add_slots(removal.slots, days, WORKDAY_START, start_hour, week)
-                if end_hour < WORKDAY_END:
-                    _add_slots(removal.slots, days, end_hour, WORKDAY_END, week)
+                if start_hour > workday_start:
+                    _add_slots(removal.slots, days, workday_start, start_hour, week)
+                if end_hour < workday_end:
+                    _add_slots(removal.slots, days, end_hour, workday_end, week)
 
     return ExtractedAvailability(
         participants=list(participants.values()),
         removals=[removal for removal in removals.values() if removal.slots],
         implied=[item for item in implied.values() if item.slots],
+        replacements=replacements,
+        quality_flags=quality_flags,
     )
 
 
@@ -151,15 +165,20 @@ def _normalize_days(raw_days: list[str]) -> list[str]:
     return days
 
 
-def _normalize_hours(start: str | None, end: str | None) -> tuple[int, int] | None:
+def _normalize_hours(
+    start: str | None,
+    end: str | None,
+    workday_start: int = WORKDAY_START,
+    workday_end: int = WORKDAY_END,
+) -> tuple[int, int] | None:
     """Redondea a bloques de hora hacia afuera y recorta al horario laboral."""
-    start_hour = _parse_hour(start, default=WORKDAY_START, round_up=False)
-    end_hour = _parse_hour(end, default=WORKDAY_END, round_up=True)
+    start_hour = _parse_hour(start, default=workday_start, round_up=False)
+    end_hour = _parse_hour(end, default=workday_end, round_up=True)
     if start_hour is None or end_hour is None:
         return None
 
-    start_hour = max(WORKDAY_START, min(start_hour, WORKDAY_END))
-    end_hour = max(WORKDAY_START, min(end_hour, WORKDAY_END))
+    start_hour = max(workday_start, min(start_hour, workday_end))
+    end_hour = max(workday_start, min(end_hour, workday_end))
     if end_hour <= start_hour:
         return None
     return start_hour, end_hour
