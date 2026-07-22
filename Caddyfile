@@ -1,0 +1,34 @@
+# Caddy sirve el frontend y proxya /api al backend en el mismo dominio.
+# TLS automatico con Let's Encrypt cuando PUBLIC_DOMAIN es un dominio real.
+# Para pruebas locales sin dominio, PUBLIC_DOMAIN=localhost usa http en :80.
+
+{$PUBLIC_DOMAIN} {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	# El backend monta sus rutas bajo /api y expone /health.
+	handle /api/* {
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		reverse_proxy backend:8000
+	}
+	handle /health {
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		reverse_proxy backend:8000
+	}
+
+	# Todo lo demas es el frontend estatico (nginx).
+	handle {
+		reverse_proxy frontend:80
+	}
+}

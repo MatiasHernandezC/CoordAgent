@@ -1,0 +1,98 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en .env.prod}
+      POSTGRES_DB: ${POSTGRES_DB:-meetingdb}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-meetingdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # Sin "ports": la base solo es accesible dentro de la red de Docker.
+
+  backend:
+    build: ./backend
+    environment:
+      APP_ENV: production
+      DB_BACKEND: postgres
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meetingdb}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
+      GEMINI_COOLDOWN_SECONDS: ${GEMINI_COOLDOWN_SECONDS:-60}
+      GEMINI_INPUT_PRICE_PER_MILLION: ${GEMINI_INPUT_PRICE_PER_MILLION:-0.10}
+      GEMINI_OUTPUT_PRICE_PER_MILLION: ${GEMINI_OUTPUT_PRICE_PER_MILLION:-0.40}
+      LLM_FALLBACK_ENABLED: ${LLM_FALLBACK_ENABLED:-true}
+      LLM_CACHE_ENABLED: ${LLM_CACHE_ENABLED:-true}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Santiago}
+      CORS_ORIGINS: ${PUBLIC_URL:-http://localhost}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # Sin "ports": Caddy lo publica bajo /api.
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Mismo dominio que sirve Caddy: las llamadas /api quedan en el mismo origen.
+        VITE_API_URL: ${PUBLIC_URL:-http://localhost}
+        VITE_BOT_PHONE_NUMBER: ${BOT_PHONE_NUMBER:-+56 9 3527 1985}
+    restart: unless-stopped
+    # Sin "ports": Caddy lo publica en la raiz.
+
+  gateway:
+    build: ./gateway
+    environment:
+      BACKEND_URL: http://backend:8000
+      TRIGGER_WORD: ${TRIGGER_WORD:-@coordina}
+      WA_AUTH_DIR: /data/wa-auth
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Tuning opcional del supervisor (documentado en docs/DESPLIEGUE_WHATSAPP.md).
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-30000}
+      WA_CONNECT_TIMEOUT_MS: ${WA_CONNECT_TIMEOUT_MS:-60000}
+      WA_KEEP_ALIVE_MS: ${WA_KEEP_ALIVE_MS:-30000}
+      WA_RECONNECT_MIN_MS: ${WA_RECONNECT_MIN_MS:-2000}
+      WA_RECONNECT_MAX_MS: ${WA_RECONNECT_MAX_MS:-60000}
+      WA_GROUP_SYNC_INTERVAL_MS: ${WA_GROUP_SYNC_INTERVAL_MS:-300000}
+      WA_FIRE_INIT_QUERIES: ${WA_FIRE_INIT_QUERIES:-false}
+      GATEWAY_HEARTBEAT_INTERVAL_MS: ${GATEWAY_HEARTBEAT_INTERVAL_MS:-600000}
+      RECENT_MESSAGE_LIMIT: ${RECENT_MESSAGE_LIMIT:-500}
+    volumes:
+      - waauth:/data/wa-auth
+    depends_on:
+      - backend
+    restart: unless-stopped
+    # tty para poder leer el QR con: docker compose -f docker-compose.prod.yml logs -f gateway
+    stdin_open: true
+    tty: true
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?define BASIC_AUTH_USER en .env.prod}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?define BASIC_AUTH_HASH en .env.prod}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  waauth:
+  caddy_data:
+  caddy_config:
