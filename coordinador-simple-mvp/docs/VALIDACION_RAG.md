@@ -135,24 +135,24 @@ $env:PYTHONPATH="."; $env:DB_BACKEND="json"; $env:LLM_PROVIDER="mock"
 
 Escenario ficticio en panel (preferible) o grupo de prueba.
 
-1. **Setup (30 s)**
+1. **Setup (30 s)**  
    Crear sesion `Demo RAG`. Participantes: `Nicolas`, `Julissa (Yuli)`, `Matias`.
 
-2. **Memoria / RAG (45 s)**
-   Enviar: `Nicolas puede jueves de 15 a 18 y Julissa puede jueves de 15 a 18`.
+2. **Memoria / RAG (45 s)**  
+   Enviar: `Nicolas puede jueves de 15 a 18 y Julissa puede jueves de 15 a 18`.  
    Mostrar en card Procesamiento: `retrieval_used` / preview con roster (si hay ronda previa, tambien decisiones).
 
-3. **Alias (45 s)**
-   Enviar: `Yuli puede el viernes de 16 a 18`.
+3. **Alias (45 s)**  
+   Enviar: `Yuli puede el viernes de 16 a 18`.  
    Mostrar extraccion con nombre canonico `Julissa (Yuli)` (no duplicar Yuli suelto).
 
-4. **Grounding temporal (60 s)**
-   Enviar: `Puedo despues de las 18.`
-   Explicar: **no se inventa un dia**; flags de rechazo o disponibilidad parcial.
+4. **Grounding temporal (60 s)**  
+   Enviar: `Puedo despues de las 18.`  
+   Explicar: **no se inventa un dia**; flags de rechazo o disponibilidad parcial.  
    Contraste: con contexto de ronda `Estamos coordinando para el jueves` + `Yo despues de las 15` el jueves si es valido.
 
-5. **Motor Python (45 s)**
-   Mostrar opciones con % de cobertura.
+5. **Motor Python (45 s)**  
+   Mostrar opciones con % de cobertura.  
    Cierre: “Gemini interpreta; Python decide el horario”.
 
 Narrativa en una frase:

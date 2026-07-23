@@ -92,6 +92,7 @@ sequenceDiagram
   participant W as Gateway Baileys
   participant API as FastAPI
   participant DB as PostgreSQL
+  participant R as RAG estructurado
   participant L as LLM/Fallback
 
   G->>W: Mensaje de participante
@@ -101,15 +102,52 @@ sequenceDiagram
 
   G->>W: @coordina con imagen
   W->>API: POST /api/sessions/{id}/channel/messages
-  API->>DB: Lee mensajes pendientes
-  API->>L: Extrae disponibilidad
+  API->>DB: Lee mensajes pendientes y sesion
+  API->>R: Recupera memoria del grupo
+  R-->>API: roster, alias, restricciones, decisiones
+  API->>L: Extrae disponibilidad con prompt aumentado
   L-->>API: participants/removals
   API->>API: Calcula matriz y opciones
   API->>API: Renderiza PNG si aplica
-  API->>DB: Guarda respuesta y estado
+  API->>DB: Guarda respuesta, estado y last_processing
   API-->>W: Texto, imagen base64 y formato
   W-->>G: Respuesta al grupo
 ```
+
+## RAG Estructurado
+
+Antes de llamar al extractor LLM, el backend recupera memoria de la sesion
+actual desde PostgreSQL/JSON (no hay base vectorial ni embeddings):
+
+```txt
+Session / ChannelConfig
+  -> group_name, group_jid, group_participant_count
+  -> participants (roster y disponibilidad activa)
+  -> pistas de identidad desde channel_messages
+  -> ultimas 3 entradas de decision_history
+  -> bloque de prompt + fingerprint de cache
+  -> last_processing.retrieval_*
+```
+
+```mermaid
+flowchart LR
+  S[Sesion en store] --> M[group_memory]
+  M --> P[Prompt aumentado]
+  T[Transcript actual] --> P
+  P --> L[Gemini o fallback]
+  L --> E[JSON de disponibilidad]
+  E --> D[Decision Engine]
+  M --> LP[last_processing RAG]
+```
+
+Se denomina **RAG estructurado** porque es *retrieval-augmented generation*
+sobre datos tipados del dominio, no similitud coseno. El LLM sigue siendo solo
+extractor; el motor Python decide horarios.
+
+Limites duros: 40 participantes, 30 pistas de identidad, 20 restricciones y
+3 decisiones previas. El preview de trazabilidad redacts JIDs y numeros largos.
+
+Plan de implementacion: [PLAN_RAG_ESTRUCTURADO.md](PLAN_RAG_ESTRUCTURADO.md).
 
 ## Sesion Por Grupo
 

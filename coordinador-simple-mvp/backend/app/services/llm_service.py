@@ -866,7 +866,7 @@ class LlmService:
         self._gemini_blocked_until = time.monotonic() + max(seconds, 1)
         self._gemini_block_reason = reason
         logger.warning("Gemini provider paused for %s seconds. %s", seconds, reason)
-
+    
     def _extract_with_mock_rules(
         self,
         message: str,

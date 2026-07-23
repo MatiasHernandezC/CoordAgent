@@ -18,6 +18,68 @@ removals[]
 
 El LLM solo interpreta texto. El calculo de horarios lo hace Python.
 
+## RAG Estructurado (memoria de grupo)
+
+Antes de la extraccion, `build_group_memory_context(session)` recupera del
+almacen de sesiones:
+
+- nombre y tamano del grupo;
+- roster de participantes;
+- pistas de identidad / remitentes observados;
+- restricciones ya activas en la ronda;
+- ultimas decisiones confirmadas (max. 3).
+
+Ese bloque se inserta en el prompt entre el contexto temporal y el texto a
+analizar. No usa embeddings ni vector DB.
+
+La clave de cache del LLM incluye un fingerprint estable de la memoria (sin
+`retrieved_at`), para no mezclar extracciones con memorias distintas.
+
+Tras procesar, `session.last_processing` expone:
+
+```txt
+retrieval_used
+retrieval_source
+retrieval_participant_count
+retrieval_past_decision_count
+retrieval_preview
+```
+
+`retrieval_preview` es corto y redacts tokens sensibles; no incluye el prompt
+completo ni el transcript.
+
+### Demo local reproducible
+
+```powershell
+cd backend
+$env:PYTHONPATH="."
+$env:DB_BACKEND="json"
+$env:LLM_PROVIDER="mock"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
+```
+
+1. Crear sesion en el panel.
+2. Agregar participantes Ana y Luis (o extraer un primer mensaje con ambos).
+3. Enviar otro mensaje ambiguo ("tambien puedo el martes").
+4. Revisar `last_processing.retrieval_used=true` y el preview con roster.
+
+Parrafo para informe:
+
+> El sistema usa un LLM (Gemini) como extractor semantico de disponibilidad.
+> Para desambiguar participantes y dar continuidad entre coordinaciones del
+> mismo grupo se incorpora RAG estructurado: antes de generar se recuperan
+> desde el almacen de sesiones el roster, pistas de identidad y las ultimas
+> decisiones del grupo, y ese contexto aumenta el prompt. La eleccion del
+> horario permanece en un motor determinista en Python; el LLM no decide la
+> reunion.
+
+Validacion operativa (local + droplet, rollback y casos Gemini):
+[VALIDACION_RAG.md](VALIDACION_RAG.md).
+
+Post-proceso determinista: `apply_memory_identity` renombra alias extraidos
+(ej. `Yuli` -> `Julissa (Yuli)`) usando el roster recuperado, sin inventar
+horarios.
+
 ## Donde Configurar
 
 Local con `uvicorn`:
@@ -42,6 +104,7 @@ LLM_PROVIDER=gemini
 GEMINI_API_KEY=tu_api_key
 LLM_KEYS_MASTER_KEY=una_llave_aleatoria_de_32_bytes_en_base64
 GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL_FALLBACK=gemini-flash-lite-latest
 GEMINI_COOLDOWN_SECONDS=60
 LLM_FALLBACK_ENABLED=true
 LLM_CACHE_ENABLED=true
@@ -51,6 +114,17 @@ GEMINI_OUTPUT_PRICE_PER_MILLION=0.40
 
 `docker-compose.prod.yml` pasa estas variables al backend. Si no las defines,
 usa defaults conservadores.
+
+### Fallback de modelo Gemini (por llave)
+
+Si `generateContent` del modelo principal responde **404** (p. ej. mensaje de
+Google *"no longer available to new users"* en algunas llaves nuevas), el
+backend reintenta **una vez** con `GEMINI_MODEL_FALLBACK` en la misma
+credencial. Si el fallback funciona, la llave queda usable (`ready`) y no se
+excluye del pool. Vaciar `GEMINI_MODEL_FALLBACK` desactiva este reintento.
+
+Esto es independiente del **fallback por reglas** (`LLM_FALLBACK_ENABLED`), que
+actua cuando Gemini no esta disponible en absoluto.
 
 ## Por Que Gemini Flash-Lite
 

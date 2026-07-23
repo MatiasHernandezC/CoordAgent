@@ -196,7 +196,7 @@ retrieval_past_decision_count: int = 0
 retrieval_preview: str = ""
 ```
 
-Mínimo para defensa: campos visibles en respuesta API.
+Mínimo para defensa: campos visibles en respuesta API.  
 UI en panel: opcional.
 
 ---

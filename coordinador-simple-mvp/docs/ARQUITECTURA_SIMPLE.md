@@ -20,6 +20,7 @@ flowchart LR
 
 ```txt
 WhatsApp y frontend capturan mensajes.
+RAG estructurado recupera memoria del grupo.
 LLM/fallback extraen disponibilidad.
 Python calcula opciones.
 PostgreSQL guarda sesiones e historial.
