@@ -35,6 +35,11 @@ export type ProcessingSummary = {
   cached: boolean;
   fallback_used: boolean;
   quality_flags: string[];
+  retrieval_used?: boolean;
+  retrieval_source?: string | null;
+  retrieval_participant_count?: number;
+  retrieval_past_decision_count?: number;
+  retrieval_preview?: string;
   updated_at: string;
 };
 

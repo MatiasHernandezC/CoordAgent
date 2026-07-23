@@ -66,6 +66,15 @@ def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
     for participant in session.participants:
         for slot in participant.availability:
             week_offsets.add(slot.week_offset)
+            # Expand the matrix window when declared slots fall outside the
+            # configured workday (e.g. "a las 7" → 19:00 with end=18).
+            try:
+                slot_start_h = int(slot.start.split(":")[0])
+                slot_end_h = int(slot.end.split(":")[0])
+            except (TypeError, ValueError):
+                slot_start_h, slot_end_h = workday_start, workday_end
+            workday_start = min(workday_start, max(0, slot_start_h))
+            workday_end = max(workday_end, min(23, slot_end_h))
             for block in split_into_hour_blocks(slot):
                 key = (block.week_offset, block.day, block.start, block.end)
                 scores.setdefault(key, set()).add(participant.name)

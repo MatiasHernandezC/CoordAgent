@@ -1,4 +1,10 @@
-"""Renderiza la disponibilidad como PNG liviano para WhatsApp."""
+"""Renderiza la disponibilidad como PNG liviano para WhatsApp.
+
+La grilla se adapta al rango real de horas de la sesion (no solo 09-17) y al
+alto necesario para que todas las filas quepan sin recortarse.
+"""
+from __future__ import annotations
+
 import base64
 import io
 from datetime import datetime
@@ -21,11 +27,12 @@ DAY_LABELS = {
     "jueves": "Jue",
     "viernes": "Vie",
 }
-HOURS = list(range(9, 18))
 
 WIDTH = 1125
-HEIGHT = 600
 MARGIN = 32
+MAX_HEIGHT = 1600
+MIN_CELL_H = 20
+PREFERRED_CELL_H = 31
 
 INK = (20, 35, 49)
 NAVY = (18, 48, 74)
@@ -57,6 +64,79 @@ def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def hours_for_session(session: Session) -> list[int]:
+    """Horas a dibujar: union de la matriz real y la ventana configurada."""
+    hours: set[int] = set()
+    for cell in session.availability_matrix:
+        try:
+            hours.add(int(str(cell.start).split(":")[0]))
+        except (TypeError, ValueError):
+            continue
+    for participant in session.participants:
+        for slot in participant.availability:
+            try:
+                start_h = int(str(slot.start).split(":")[0])
+                end_h = int(str(slot.end).split(":")[0])
+            except (TypeError, ValueError):
+                continue
+            for hour in range(start_h, max(start_h + 1, end_h)):
+                if 0 <= hour <= 22:
+                    hours.add(hour)
+
+    if hours:
+        low = min(min(hours), session.channel_config.workday_start_hour)
+        high = max(max(hours), session.channel_config.workday_end_hour - 1)
+        low = max(0, min(low, 22))
+        high = max(low, min(high, 22))
+        return list(range(low, high + 1))
+
+    start = max(0, min(session.channel_config.workday_start_hour, 22))
+    end = max(start + 1, min(session.channel_config.workday_end_hour, 23))
+    return list(range(start, end))
+
+
+def layout_for_hours(hour_count: int) -> dict[str, int]:
+    """Calcula alto de imagen y celda para que la grilla no se recorte."""
+    header_bottom = 122
+    footer_space = 52
+    grid_top_pad = 80
+    head_h = 34
+    grid_gap = 9
+    card_bottom_pad = 18
+
+    available_for_rows = (
+        MAX_HEIGHT
+        - header_bottom
+        - footer_space
+        - grid_top_pad
+        - head_h
+        - grid_gap
+        - card_bottom_pad
+        - MARGIN
+    )
+    n = max(hour_count, 1)
+    cell_h = min(PREFERRED_CELL_H, max(MIN_CELL_H, available_for_rows // n))
+    grid_body = head_h + grid_gap + n * cell_h
+    heatmap_top = header_bottom
+    heatmap_bottom = heatmap_top + grid_top_pad + grid_body + card_bottom_pad
+    height = min(MAX_HEIGHT, heatmap_bottom + footer_space)
+    # Si aun no cabe, recompacta celdas al maximo permitido.
+    if heatmap_bottom + footer_space > MAX_HEIGHT:
+        cell_h = max(MIN_CELL_H, (available_for_rows) // n)
+        grid_body = head_h + grid_gap + n * cell_h
+        heatmap_bottom = heatmap_top + grid_top_pad + grid_body + card_bottom_pad
+        height = MAX_HEIGHT
+
+    return {
+        "height": height,
+        "cell_h": cell_h,
+        "head_h": head_h,
+        "heatmap_top": heatmap_top,
+        "heatmap_bottom": min(heatmap_bottom, height - footer_space + 10),
+        "footer_y": height - 52,
+    }
+
+
 def render_availability_png(session: Session, now: datetime | None = None) -> bytes:
     total = max(len(session.participants), 1)
     declared_count = session.channel_config.group_participant_count or len(session.participants)
@@ -71,8 +151,11 @@ def render_availability_png(session: Session, now: datetime | None = None) -> by
         if cell.week_offset == target_week
     }
     day_labels = build_day_labels(now, target_week)
+    hours = hours_for_session(session)
+    layout = layout_for_hours(len(hours))
+    height = layout["height"]
 
-    image = Image.new("RGB", (WIDTH, HEIGHT), SOFT)
+    image = Image.new("RGB", (WIDTH, height), SOFT)
     draw = ImageDraw.Draw(image)
 
     fonts = {
@@ -84,20 +167,31 @@ def render_availability_png(session: Session, now: datetime | None = None) -> by
         "label": _font(14, True),
         "metric": _font(46, True),
         "time": _font(30, True),
-        "cell": _font(14, True),
+        "cell": _font(13 if layout["cell_h"] < 26 else 14, True),
         "body": _font(15),
     }
 
     draw_header(draw, session, declared_count, fonts)
 
-    heatmap_box = (MARGIN, 122, 740, 526)
-    insight_box = (766, 122, WIDTH - MARGIN, 526)
+    heatmap_box = (MARGIN, layout["heatmap_top"], 740, layout["heatmap_bottom"])
+    insight_box = (766, layout["heatmap_top"], WIDTH - MARGIN, layout["heatmap_bottom"])
     draw_card(draw, heatmap_box, radius=18)
     draw_card(draw, insight_box, radius=18)
 
-    draw_heatmap(draw, heatmap_box, cells, total, best, fonts, day_labels)
+    draw_heatmap(
+        draw,
+        heatmap_box,
+        cells,
+        total,
+        best,
+        fonts,
+        day_labels,
+        hours=hours,
+        cell_h=layout["cell_h"],
+        head_h=layout["head_h"],
+    )
     draw_insights(draw, insight_box, session, best, fonts, now)
-    draw_footer(draw, session, fonts)
+    draw_footer(draw, session, fonts, y=layout["footer_y"])
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
@@ -139,18 +233,26 @@ def draw_heatmap(
     best: TimeOption | None,
     fonts: dict,
     day_labels: dict[str, str] | None = None,
+    hours: list[int] | None = None,
+    cell_h: int = PREFERRED_CELL_H,
+    head_h: int = 34,
 ) -> None:
     x0, y0, x1, y1 = box
     labels = day_labels or DAY_LABELS
+    hour_rows = hours if hours is not None else list(range(9, 18))
     draw.text((x0 + 24, y0 + 18), "Cobertura por horario", font=fonts["section"], fill=INK)
-    draw.text((x0 + 24, y0 + 44), "Cada celda muestra cuantos pueden asistir.", font=fonts["small"], fill=MUTED)
+    range_label = f"{hour_rows[0]:02d}:00-{hour_rows[-1] + 1:02d}:00" if hour_rows else "sin horas"
+    draw.text(
+        (x0 + 24, y0 + 44),
+        f"Cada celda muestra cuantos pueden asistir · {range_label}",
+        font=fonts["small"],
+        fill=MUTED,
+    )
     draw_heat_legend(draw, x1 - 292, y0 + 42, fonts)
 
     grid_x = x0 + 82
     grid_y = y0 + 80
     day_w = (x1 - grid_x - 24) / len(WEEKDAYS)
-    head_h = 34
-    cell_h = 31
 
     for i, day in enumerate(WEEKDAYS):
         dx0 = grid_x + i * day_w
@@ -159,9 +261,12 @@ def draw_heatmap(
         draw.rounded_rectangle([dx0 + 3, grid_y, dx0 + day_w - 3, grid_y + head_h], radius=9, fill=fill)
         draw_centered(draw, (dx0, grid_y, dx0 + day_w, grid_y + head_h), labels[day], fonts["label"], text_fill)
 
-    for row, hour in enumerate(HOURS):
+    for row, hour in enumerate(hour_rows):
         cy = grid_y + head_h + 9 + row * cell_h
-        draw.text((x0 + 24, cy + 7), f"{hour:02d}", font=fonts["small"], fill=MUTED)
+        # No dibujar fuera de la tarjeta.
+        if cy + cell_h > y1 - 8:
+            break
+        draw.text((x0 + 24, cy + max(2, (cell_h - 14) // 2)), f"{hour:02d}", font=fonts["small"], fill=MUTED)
         for i, day in enumerate(WEEKDAYS):
             cx = grid_x + i * day_w
             cell = cells.get((day, f"{hour:02d}:00"))
@@ -173,7 +278,7 @@ def draw_heatmap(
             width = 3 if is_best else 1
             draw.rounded_rectangle(
                 [cx + 4, cy + 3, cx + day_w - 4, cy + cell_h - 3],
-                radius=8,
+                radius=max(5, min(8, cell_h // 3)),
                 fill=fill,
                 outline=outline,
                 width=width,
@@ -226,8 +331,7 @@ def draw_insights(
         draw_pill(draw, (x0 + 24, y1 - 58, x1 - 24, y1 - 24), "Listo para confirmar en el grupo", fonts["label"], (229, 246, 237), GREEN)
 
 
-def draw_footer(draw: ImageDraw.ImageDraw, session: Session, fonts: dict) -> None:
-    y = 548
+def draw_footer(draw: ImageDraw.ImageDraw, session: Session, fonts: dict, y: int = 548) -> None:
     trigger = session.channel_config.trigger_word or "@coordina"
     text = f"Para actualizar: escriban nuevas disponibilidades y usen {trigger}."
     draw_ellipsis(draw, (MARGIN + 4, y), text, fonts["small"], MUTED, max_width=WIDTH - 2 * MARGIN - 8)

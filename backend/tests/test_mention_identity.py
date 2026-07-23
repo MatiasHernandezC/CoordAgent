@@ -487,7 +487,7 @@ def test_remove_command_requires_mention_then_removes_by_jid_idempotently(api_cl
     assert retried["session"]["participants"] == []
 
 
-def test_numeric_mention_uses_placeholder_until_target_speaks(
+def test_numeric_mention_uses_safe_placeholder_until_target_speaks(
     mock_llm: LlmService,
     sessions: SessionService,
 ):
@@ -503,7 +503,8 @@ def test_numeric_mention_uses_placeholder_until_target_speaks(
             )
         ]
     )
-    assert mentioned.participants[0].name.startswith("Contacto ")
+    assert mentioned.participants[0].name == "Contacto mencionado"
+    assert "5000" not in mentioned.participants[0].name
     session = sessions.merge_extraction(session.id, mentioned, source="channel_mock")
 
     self_report, _, _ = mock_llm.extract_channel_availability(
@@ -521,6 +522,93 @@ def test_numeric_mention_uses_placeholder_until_target_speaks(
     assert len(session.participants) == 1
     assert session.participants[0].name == "Gabriel"
     assert {slot.day for slot in session.participants[0].availability} == {"lunes", "martes"}
+
+
+def test_numeric_lid_mention_uses_prior_pushname_from_same_batch(mock_llm: LlmService):
+    """WhatsApp a menudo deja el LID en el texto; el bot debe mostrar el pushName."""
+
+    target_lid = "119048071307283@lid"
+    extraction, source, _ = mock_llm.extract_channel_availability(
+        [
+            ChannelMessage(
+                sender="Gabriel",
+                sender_id=target_lid,
+                sender_aliases=[target_lid],
+                text="estoy libre manana",
+            ),
+            ChannelMessage(
+                sender="Nicolas",
+                sender_id="269402494730288@lid",
+                sender_aliases=["269402494730288@lid", "56993547119@s.whatsapp.net"],
+                mentioned_jids=[target_lid],
+                text="@119048071307283 puede manana a las 3 y todo el jueves",
+            ),
+        ]
+    )
+
+    assert source == "channel_mock"
+    mentioned = next(
+        participant
+        for participant in extraction.participants
+        if participant.external_id == target_lid or target_lid in participant.external_ids
+    )
+    assert mentioned.name == "Gabriel"
+    assert "Contacto mencionado" not in {item.name for item in extraction.participants}
+    assert "119048071307283" not in mentioned.name
+
+
+def test_session_history_resolves_generated_name_after_lid_mention(
+    mock_llm: LlmService,
+    sessions: SessionService,
+):
+    target_lid = "119048071307283@lid"
+    session = sessions.create("Torneo resolucion")
+    sessions.add_channel_message(
+        session.id,
+        "Gabriel",
+        "Yo puedo manana despues de las 2",
+        sender_id=target_lid,
+        sender_aliases=[target_lid],
+    )
+    # Reinicio de contexto: el pushName sigue en el historial auditable.
+    sessions.reset_channel_context(session.id)
+    mentioned, _, _ = mock_llm.extract_channel_availability(
+        [
+            ChannelMessage(
+                sender="Nicolas",
+                sender_id="269402494730288@lid",
+                mentioned_jids=[target_lid],
+                text="@119048071307283 puede manana a las 3 y todo el jueves",
+            )
+        ]
+    )
+    assert mentioned.participants[0].name == "Contacto mencionado"
+    session = sessions.merge_extraction(session.id, mentioned, source="channel_mock")
+
+    assert len(session.participants) == 1
+    assert session.participants[0].name == "Gabriel"
+    assert session.participants[0].external_id == target_lid
+
+
+def test_old_numeric_contact_label_is_migrated_without_changing_identity(sessions: SessionService):
+    session = sessions.create("Migracion de etiqueta")
+    session.participants = [
+        Participant(
+            name="Contacto 5000",
+            external_id="276514323067118@lid",
+            availability=[],
+        )
+    ]
+    session.missing_info = ["Falta disponibilidad de Contacto 5000."]
+    session.last_agent_reply = "Falta disponibilidad de Contacto 5000."
+    session_module.repository.save(session)
+
+    migrated = sessions.get(session.id)
+
+    assert migrated.participants[0].name == "Contacto mencionado"
+    assert migrated.participants[0].external_id == "276514323067118@lid"
+    assert migrated.missing_info == ["Falta disponibilidad de Contacto mencionado."]
+    assert migrated.last_agent_reply == "Falta disponibilidad de Contacto mencionado."
 
 
 def test_mixed_self_and_plain_third_party_message_is_discarded_entirely(mock_llm: LlmService):

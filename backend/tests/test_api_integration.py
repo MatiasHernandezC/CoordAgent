@@ -734,7 +734,7 @@ def test_group_coverage_uses_real_roster_and_blocks_false_consensus(client):
     assert "Aun no se puede confirmar" in (body["agent_reply"] or "")
 
 
-def test_any_group_member_can_run_all_coordination_commands_but_revision_is_still_required(client):
+def test_any_group_member_can_run_all_coordination_commands_with_simple_confirmation(client):
     session_id = _create(client, "Grupo colaborativo")
     admin_jid = "56911111111@s.whatsapp.net"
     member_jid = "56922222222@s.whatsapp.net"
@@ -758,22 +758,12 @@ def test_any_group_member_can_run_all_coordination_commands_but_revision_is_stil
         },
     ).json()
     revision = proposal["session"]["proposal_revision"]
-    assert f"R{revision}" in (proposal["agent_reply"] or "")
-
-    missing_revision = client.post(
-        f"/api/sessions/{session_id}/channel/messages",
-        json={"sender": "Miembro", "sender_id": member_jid, "text": "@coordina confirmar 1"},
-    ).json()
-    assert "Falta la revision" in (missing_revision["agent_reply"] or "")
-    assert missing_revision["session"]["selected_option"] is None
+    assert "@coordina confirmar" in (proposal["agent_reply"] or "")
+    assert f"R{revision}" not in (proposal["agent_reply"] or "")
 
     confirmed = client.post(
         f"/api/sessions/{session_id}/channel/messages",
-        json={
-            "sender": "Miembro",
-            "sender_id": member_jid,
-            "text": f"@coordina confirmar 1 R{revision}",
-        },
+        json={"sender": "Miembro", "sender_id": member_jid, "text": "@coordina confirmar 1"},
     ).json()
     assert confirmed["session"]["status"] == "confirmed"
     assert confirmed["session"]["decision_history"][-1]["confirmed_by"] == "Miembro"
@@ -981,10 +971,16 @@ def test_paused_and_archived_sessions_discard_new_channel_messages(client):
 
 def test_repeated_message_is_served_from_cache(client):
     session_id = _create(client)
-    first = client.post(f"/api/sessions/{session_id}/message", json={"message": "Rodrigo puede viernes en la tarde"})
-    second = client.post(f"/api/sessions/{session_id}/message", json={"message": "Rodrigo puede viernes en la tarde"})
+    message = {"message": "Rodrigo puede viernes en la tarde"}
+    # La primera extraccion cambia la memoria de grupo (roster/restricciones),
+    # asi que la segunda puede no reutilizar cache. A partir de memoria estable
+    # el mismo texto debe servir desde cache.
+    first = client.post(f"/api/sessions/{session_id}/message", json=message)
+    second = client.post(f"/api/sessions/{session_id}/message", json=message)
+    third = client.post(f"/api/sessions/{session_id}/message", json=message)
     assert first.json()["llm_source"] == "mock"
-    assert second.json()["llm_source"] == "mock_cache"
+    assert second.json()["llm_source"] in {"mock", "mock_cache"}
+    assert third.json()["llm_source"] == "mock_cache"
 
 
 # --- Hardening (P3) ---------------------------------------------------------
@@ -1003,6 +999,36 @@ def test_extraction_exposes_last_processing_summary(client):
     assert processing["source"] == "mock"
     assert processing["confidence"] == "high"
     assert processing["participants_detected"] == 1
+    # First extraction may only have the session title as memory.
+    assert "retrieval_used" in processing
+    assert processing["retrieval_participant_count"] >= 0
+
+
+def test_extraction_exposes_structured_rag_after_prior_state(client):
+    session_id = _create(client)
+    # Seed roster + a confirmed-style decision trail via availability then calculate/confirm if available.
+    client.post(
+        f"/api/sessions/{session_id}/participants",
+        json={"name": "Ana"},
+    )
+    client.post(
+        f"/api/sessions/{session_id}/participants",
+        json={"name": "Luis"},
+    )
+    client.post(
+        f"/api/sessions/{session_id}/message",
+        json={"message": "Ana puede lunes de 10 a 12 y Luis puede lunes de 10 a 12"},
+    )
+    processing = client.post(
+        f"/api/sessions/{session_id}/message",
+        json={"message": "tambien puedo el martes a las 3"},
+    ).json()["session"]["last_processing"]
+
+    assert processing["retrieval_used"] is True
+    assert processing["retrieval_source"] == "session_store"
+    assert processing["retrieval_participant_count"] >= 2
+    assert processing["retrieval_preview"]
+    assert "roster=" in processing["retrieval_preview"]
 
 
 def test_unexpected_error_returns_clean_500(tmp_path, monkeypatch):

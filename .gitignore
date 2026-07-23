@@ -2,6 +2,7 @@ backend/.venv/
 backend/.pytest_cache/
 backend/data/sessions.json
 backend/data/llm_keys.json
+data/llm_keys.json
 
 **/__pycache__/
 *.py[cod]

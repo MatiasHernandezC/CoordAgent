@@ -795,6 +795,15 @@ export function App() {
                   <span>Procesamiento</span>
                   <strong>{lastProcessing?.confidence_label ?? "Sin datos"}</strong>
                   <p>{lastProcessing ? `${lastProcessing.source} - ${lastProcessing.detail}` : "Aun no hay extraccion registrada."}</p>
+                  {lastProcessing?.retrieval_used ? (
+                    <p className="ops-card-meta">
+                      RAG: {lastProcessing.retrieval_participant_count ?? 0} en roster
+                      {typeof lastProcessing.retrieval_past_decision_count === "number"
+                        ? `, ${lastProcessing.retrieval_past_decision_count} decisiones previas`
+                        : ""}
+                      {lastProcessing.retrieval_preview ? ` — ${lastProcessing.retrieval_preview}` : ""}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="ops-card">
                   <span>Decision</span>

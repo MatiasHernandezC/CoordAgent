@@ -101,6 +101,13 @@ class Settings:
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    # Si generateContent del modelo principal devuelve 404 (p. ej. "no longer
+    # available to new users"), se reintenta una vez con este modelo en la
+    # misma llave. Vacio desactiva el fallback de modelo.
+    gemini_model_fallback: str = os.getenv(
+        "GEMINI_MODEL_FALLBACK",
+        "gemini-flash-lite-latest",
+    )
     gemini_url: str = os.getenv(
         "GEMINI_URL",
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",

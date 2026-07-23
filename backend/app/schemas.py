@@ -76,6 +76,12 @@ class ProcessingSummary(BaseModel):
     cached: bool = False
     fallback_used: bool = False
     quality_flags: list[str] = Field(default_factory=list)
+    # Structured RAG metadata (defaults keep old sessions / clients compatible).
+    retrieval_used: bool = False
+    retrieval_source: str | None = None
+    retrieval_participant_count: int = 0
+    retrieval_past_decision_count: int = 0
+    retrieval_preview: str = ""
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 

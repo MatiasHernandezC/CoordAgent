@@ -26,6 +26,7 @@ from app.schemas import (
 from app.settings import settings
 from app.services.calendar_export import build_calendar_ics
 from app.services.image_render import render_availability_base64
+from app.services.group_memory import build_group_memory_context
 from app.services.llm_service import LlmUnavailableError, llm_service
 from app.services.llm_key_service import llm_key_service
 from app.services.ops_status import fetch_gateway_status
@@ -165,16 +166,25 @@ def add_message(session_id: str, payload: MessageRequest):
     started = perf_counter()
     with session_service.session_lock(session_id):
         session = session_service.get(session_id)
+        group_memory = build_group_memory_context(session)
         try:
             extraction, source, token_usage = llm_service.extract_availability(
                 payload.message,
                 session.channel_config.workday_start_hour,
                 session.channel_config.workday_end_hour,
+                group_memory=group_memory,
             )
         except LlmUnavailableError as error:
             raise_llm_http_error(error)
 
-        session = session_service.merge_extraction(session_id, extraction, payload.message, source, token_usage)
+        session = session_service.merge_extraction(
+            session_id,
+            extraction,
+            payload.message,
+            source,
+            token_usage,
+            group_memory=group_memory,
+        )
         return MessageResponse(
             session=session,
             llm_source=source,
@@ -376,11 +386,13 @@ def invoke_channel_if_needed(
         return command_response
 
     pending_messages = session_service.pending_channel_messages(session)
+    group_memory = build_group_memory_context(session)
     try:
         extraction, source, token_usage = llm_service.extract_channel_availability(
             pending_messages,
             session.channel_config.workday_start_hour,
             session.channel_config.workday_end_hour,
+            group_memory=group_memory,
         )
     except LlmUnavailableError as error:
         raise_llm_http_error(error)
@@ -391,6 +403,7 @@ def invoke_channel_if_needed(
         original_message="Invocacion desde canal simulado.",
         source=source,
         token_usage=token_usage,
+        group_memory=group_memory,
     )
     session = session_service.calculate(session_id)
     reply = build_channel_reply(session)
@@ -466,11 +479,13 @@ def invoke_channel_command_if_needed(
     token_usage = None
     pending_messages = session_service.pending_channel_messages(session)
     if pending_messages:
+        group_memory = build_group_memory_context(session)
         try:
             extraction, source, token_usage = llm_service.extract_channel_availability(
                 pending_messages,
                 session.channel_config.workday_start_hour,
                 session.channel_config.workday_end_hour,
+                group_memory=group_memory,
             )
         except LlmUnavailableError as error:
             raise_llm_http_error(error)
@@ -487,6 +502,7 @@ def invoke_channel_command_if_needed(
                 original_message="Invocacion desde canal simulado.",
                 source=source,
                 token_usage=token_usage,
+                group_memory=group_memory,
             )
 
     reply = ""
@@ -503,7 +519,13 @@ def invoke_channel_command_if_needed(
         session = session_service.calculate(session_id)
 
         option_index = command["option_index"]
+        # El codigo Rn continua siendo aceptado para proteger confirmaciones
+        # explicitas contra una propuesta antigua. Para el uso cotidiano no
+        # obligamos a copiarlo: sin Rn se confirma la propuesta vigente que
+        # acabamos de recalcular bajo el lock del grupo.
         expected_revision = command.get("proposal_revision")
+        if expected_revision is None:
+            expected_revision = session.proposal_revision
         blockers = confirmation_blockers(session)
         if blockers:
             reply = (
@@ -512,12 +534,6 @@ def invoke_channel_command_if_needed(
                 + "\n".join(f"- {item}" for item in blockers)
                 + "\n\n"
                 + build_channel_reply(session)
-            )
-        elif session.channel_config.group_jid and expected_revision is None:
-            reply = (
-                "*Coordina*\n\n"
-                "Falta la revision de la propuesta. Confirma usando el codigo actual: "
-                f"*@coordina confirmar 1 R{session.proposal_revision}*."
             )
         elif expected_revision is not None and expected_revision != session.proposal_revision:
             reply = (

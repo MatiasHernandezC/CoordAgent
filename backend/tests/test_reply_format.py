@@ -6,7 +6,11 @@ from PIL import Image
 
 from app.schemas import ChannelMessage, Participant, Session, TimeSlot
 from app.services.decision_engine import build_availability_matrix, options_from_matrix
-from app.services.image_render import render_availability_png
+from app.services.image_render import (
+    hours_for_session,
+    layout_for_hours,
+    render_availability_png,
+)
 from app.services.session_service import (
     build_channel_reply,
     resolve_reply_format,
@@ -43,15 +47,48 @@ def test_reply_without_participants_invites_to_write():
 
 
 def test_render_availability_png_is_a_valid_image():
-    png = render_availability_png(_session_with_options())
+    session = _session_with_options()
+    png = render_availability_png(session)
 
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     image = Image.open(io.BytesIO(png))
     assert image.format == "PNG"
-    assert image.size == (1125, 600)
+    hours = hours_for_session(session)
+    expected_h = layout_for_hours(len(hours))["height"]
+    assert image.size == (1125, expected_h)
+    assert 500 <= image.size[1] <= 1600
     colors = image.convert("RGB").getcolors(maxcolors=1_000_000)
     assert colors is not None and len(colors) > 20
     assert len(png) < 400_000
+
+
+def test_render_expands_to_cover_evening_hours():
+    """Si hay slots de noche, la grilla debe incluirlos (no quedarse en 09-17)."""
+    session = Session(
+        title="Noche",
+        participants=[
+            Participant(name="Ana", availability=[TimeSlot(day="lunes", start="19:00", end="21:00")]),
+            Participant(name="Beto", availability=[TimeSlot(day="lunes", start="20:00", end="22:00")]),
+        ],
+    )
+    session.channel_config.workday_start_hour = 9
+    session.channel_config.workday_end_hour = 22
+    session.availability_matrix = build_availability_matrix(session)
+    session.options = options_from_matrix(session.availability_matrix)
+
+    hours = hours_for_session(session)
+    assert 9 in hours
+    assert 20 in hours
+    assert 21 in hours
+    assert hours[-1] >= 20
+
+    png = render_availability_png(session)
+    image = Image.open(io.BytesIO(png))
+    assert image.size[0] == 1125
+    # Mas filas => mas alto que el layout de 9 horas tipicas, sin pasar el tope.
+    assert image.size[1] > layout_for_hours(9)["height"]
+    assert image.size[1] <= 1600
+    assert len(png) < 500_000
 
 
 def test_replies_include_concrete_dates_and_calendar_link():

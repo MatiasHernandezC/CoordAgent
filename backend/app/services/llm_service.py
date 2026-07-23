@@ -24,6 +24,12 @@ from app.schemas import (
     TokenUsage,
 )
 from app.services.credential_crypto import CredentialEncryptionError
+from app.services.group_memory import (
+    GroupMemoryContext,
+    apply_memory_identity,
+    memory_fingerprint,
+    resolve_memory_prompt_block,
+)
 from app.services.llm_key_service import llm_key_service
 from app.services.schedule_compiler import compile_interpretation
 from app.settings import settings
@@ -131,21 +137,49 @@ class LlmService:
         message: str,
         workday_start: int = WORKDAY_START_HOUR,
         workday_end: int = WORKDAY_END_HOUR,
+        group_memory: GroupMemoryContext | str | None = None,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         validate_workday_window(workday_start, workday_end)
-        cache_key = build_cache_key(message, workday_start, workday_end)
+        memory_obj = group_memory if isinstance(group_memory, GroupMemoryContext) else None
+        memory_fp = memory_fingerprint(group_memory)
+        memory_block = resolve_memory_prompt_block(group_memory)
+        round_context = active_round_context
+        cache_key = build_cache_key(
+            message,
+            workday_start,
+            workday_end,
+            memory_fingerprint=memory_fp,
+        )
         if settings.llm_cache_enabled and cache_key in self._cache:
             cached_extraction, cached_source, cached_tokens = self._cache[cache_key]
-
-            return (
+            cached_extraction = apply_memory_identity(
                 cached_extraction.model_copy(deep=True),
+                memory_obj,
+            )
+            return (
+                cached_extraction,
                 f"{cached_source}_cache",
                 build_cached_token_usage(cached_tokens),
             )
 
         if settings.llm_provider == "local":
             try:
-                return self._remember(cache_key, self._extract_with_local_model(message, workday_start, workday_end), f"local_{settings.local_llm_model}", None)
+                return self._remember(
+                    cache_key,
+                    self._extract_with_local_model(
+                        message,
+                        workday_start,
+                        workday_end,
+                        group_memory=memory_block,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    f"local_{settings.local_llm_model}",
+                    None,
+                    group_memory=memory_obj,
+                )
             except Exception as error:
                 if not settings.llm_fallback_enabled:
                     raise LlmUnavailableError(
@@ -153,7 +187,16 @@ class LlmService:
                         status_code=503,
                     ) from error
                 # No cachear fallbacks: el proximo intento debe reintentar el LLM real.
-                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                fallback = apply_memory_identity(
+                    self._extract_with_mock_rules(
+                        message,
+                        workday_start,
+                        workday_end,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    memory_obj,
+                )
                 return fallback, f"mock_fallback_local_{settings.local_llm_model}", None
 
         if settings.llm_provider == "gemini":
@@ -168,7 +211,16 @@ class LlmService:
                         status_code=429,
                         retry_after_seconds=retry_after,
                     )
-                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                fallback = apply_memory_identity(
+                    self._extract_with_mock_rules(
+                        message,
+                        workday_start,
+                        workday_end,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    memory_obj,
+                )
                 source = f"mock_fallback_gemini_cooldown_{settings.gemini_model}"
                 return fallback, source, None
 
@@ -177,6 +229,9 @@ class LlmService:
                     message,
                     workday_start,
                     workday_end,
+                    group_memory=memory_block,
+                    active_round_context=round_context,
+                    active_round_days=active_round_days,
                 )
 
                 logger.info(
@@ -192,6 +247,7 @@ class LlmService:
                     extraction,
                     f"gemini_{settings.gemini_model}",
                     token_usage,
+                    group_memory=memory_obj,
                 )
 
             except GeminiApiError as error:
@@ -211,7 +267,16 @@ class LlmService:
 
                 # No cachear fallbacks: un 429/503 pasajero no debe dejar pegada
                 # la interpretacion del mock para este mensaje.
-                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                fallback = apply_memory_identity(
+                    self._extract_with_mock_rules(
+                        message,
+                        workday_start,
+                        workday_end,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    memory_obj,
+                )
                 source = (
                     f"mock_fallback_gemini_{settings.gemini_model}"
                     if no_keys_configured
@@ -228,45 +293,112 @@ class LlmService:
 
                 logger.warning("Gemini failed before request completion; using mock fallback. %s", error)
 
-                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                fallback = apply_memory_identity(
+                    self._extract_with_mock_rules(
+                        message,
+                        workday_start,
+                        workday_end,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    memory_obj,
+                )
                 return fallback, f"mock_fallback_gemini_{settings.gemini_model}", None
         if settings.llm_provider == "ollama":
             try:
-                return self._remember(cache_key, self._extract_with_ollama(message, workday_start, workday_end), "ollama", None)
+                return self._remember(
+                    cache_key,
+                    self._extract_with_ollama(
+                        message,
+                        workday_start,
+                        workday_end,
+                        group_memory=memory_block,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    "ollama",
+                    None,
+                    group_memory=memory_obj,
+                )
             except Exception as error:
                 if not settings.llm_fallback_enabled:
                     raise LlmUnavailableError(
                         f"Ollama fallo y el fallback esta desactivado: {error}",
                         status_code=503,
                     ) from error
-                fallback = self._extract_with_mock_rules(message, workday_start, workday_end)
+                fallback = apply_memory_identity(
+                    self._extract_with_mock_rules(
+                        message,
+                        workday_start,
+                        workday_end,
+                        active_round_context=round_context,
+                        active_round_days=active_round_days,
+                    ),
+                    memory_obj,
+                )
                 return fallback, "mock_fallback", None
 
-        return self._remember(cache_key, self._extract_with_mock_rules(message, workday_start, workday_end), "mock", None)
+        extraction = self._extract_with_mock_rules(
+            message,
+            workday_start,
+            workday_end,
+            active_round_context=round_context,
+            active_round_days=active_round_days,
+        )
+        return self._remember(cache_key, extraction, "mock", None, group_memory=memory_obj)
 
     def extract_channel_availability(
         self,
         messages: list[ChannelMessage],
         workday_start: int = WORKDAY_START_HOUR,
         workday_end: int = WORKDAY_END_HOUR,
+        group_memory: GroupMemoryContext | str | None = None,
+        active_round_context: str | None = None,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         transcript = build_channel_extraction_text(messages)
+        # Conversation context may fix the active coordination day ("para el jueves").
+        round_context = active_round_context or transcript
         if not has_extractable_scheduling_signal(transcript):
             guarded = normalize_channel_extraction(ExtractedAvailability(), messages)
             source = "channel_identity_guard" if guarded.quality_flags else "channel_no_new_availability"
             return guarded, source, None
 
-        extraction, source, token_usage = self.extract_availability(transcript, workday_start, workday_end)
+        extraction, source, token_usage = self.extract_availability(
+            transcript,
+            workday_start,
+            workday_end,
+            group_memory=group_memory,
+            active_round_context=round_context,
+        )
         extraction = normalize_channel_extraction(extraction, messages)
         return extraction, f"channel_{source}", token_usage
 
-    def _extract_with_ollama(self, message: str, workday_start: int, workday_end: int) -> ExtractedAvailability:
+    def _extract_with_ollama(
+        self,
+        message: str,
+        workday_start: int,
+        workday_end: int,
+        group_memory: str | None = None,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
+    ) -> ExtractedAvailability:
         payload = {
             "model": settings.ollama_model,
             "stream": False,
             "messages": [
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {"role": "user", "content": message},
+                {
+                    "role": "system",
+                    "content": EXTRACTION_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": build_extraction_prompt(
+                        message,
+                        workday_start=workday_start,
+                        workday_end=workday_end,
+                        group_memory=group_memory,
+                    ),
+                },
             ],
         }
         request = urllib.request.Request(
@@ -280,10 +412,34 @@ class LlmService:
 
         content = raw["message"]["content"]
         parsed = json.loads(extract_json(content))
-        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
-        return merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
+        extraction = parse_extraction_payload(
+            parsed,
+            message,
+            workday_start,
+            workday_end,
+            active_round_context=active_round_context,
+            active_round_days=active_round_days,
+        )
+        return merge_missing_participants(
+            extraction,
+            self._extract_with_mock_rules(
+                message,
+                workday_start,
+                workday_end,
+                active_round_context=active_round_context,
+                active_round_days=active_round_days,
+            ),
+        )
 
-    def _extract_with_local_model(self, message: str, workday_start: int, workday_end: int) -> ExtractedAvailability:
+    def _extract_with_local_model(
+        self,
+        message: str,
+        workday_start: int,
+        workday_end: int,
+        group_memory: str | None = None,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
+    ) -> ExtractedAvailability:
         if not settings.local_llm_script.exists():
             raise FileNotFoundError(f"No existe local_llm.py en {settings.local_llm_script}")
 
@@ -296,7 +452,12 @@ class LlmService:
             str(settings.local_llm_max_tokens),
             "--temperature",
             "0.1",
-            build_extraction_prompt(message, workday_start=workday_start, workday_end=workday_end),
+            build_extraction_prompt(
+                message,
+                workday_start=workday_start,
+                workday_end=workday_end,
+                group_memory=group_memory,
+            ),
         ]
         result = subprocess.run(
             command,
@@ -311,8 +472,24 @@ class LlmService:
             raise RuntimeError(result.stderr.strip() or "El LLM local fallo sin detalle.")
 
         parsed = json.loads(extract_json(result.stdout))
-        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
-        return merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
+        extraction = parse_extraction_payload(
+            parsed,
+            message,
+            workday_start,
+            workday_end,
+            active_round_context=active_round_context,
+            active_round_days=active_round_days,
+        )
+        return merge_missing_participants(
+            extraction,
+            self._extract_with_mock_rules(
+                message,
+                workday_start,
+                workday_end,
+                active_round_context=active_round_context,
+                active_round_days=active_round_days,
+            ),
+        )
 
     def _extract_with_gemini(
         self,
@@ -320,75 +497,95 @@ class LlmService:
         workday_start: int,
         workday_end: int,
         api_key: str | None = None,
+        group_memory: str | None = None,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
     ) -> tuple[ExtractedAvailability, TokenUsage]:
         selected_api_key = (api_key or settings.gemini_api_key).strip()
         if not selected_api_key:
             raise ValueError("Falta GEMINI_API_KEY")
 
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": build_extraction_prompt(message, workday_start=workday_start, workday_end=workday_end)}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-            },
-        }
+        prompt_text = build_extraction_prompt(
+            message,
+            workday_start=workday_start,
+            workday_end=workday_end,
+            group_memory=group_memory,
+        )
+        raw, time_to_first_token_ms, used_model = self._call_gemini_with_model_fallback(
+            prompt_text,
+            selected_api_key,
+        )
+        content = extract_gemini_text(raw)
+        parse_retries = 0
+        try:
+            parsed = json.loads(extract_json(content))
+            extraction = parse_extraction_payload(
+                parsed,
+                message,
+                workday_start,
+                workday_end,
+                active_round_context=active_round_context,
+                active_round_days=active_round_days,
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as first_error:
+            parse_retries = 1
+            logger.warning(
+                "gemini_json_parse_error provider=gemini retry=1 error_type=%s model=%s",
+                type(first_error).__name__,
+                used_model,
+            )
+            repair_prompt = (
+                prompt_text
+                + "\n\nTu respuesta anterior no fue JSON valido. "
+                "Responde SOLO con el objeto JSON pedido, sin markdown ni texto extra."
+            )
+            raw, time_to_first_token_ms, used_model = self._call_gemini_with_model_fallback(
+                repair_prompt,
+                selected_api_key,
+            )
+            content = extract_gemini_text(raw)
+            try:
+                parsed = json.loads(extract_json(content))
+                extraction = parse_extraction_payload(
+                    parsed,
+                    message,
+                    workday_start,
+                    workday_end,
+                    active_round_context=active_round_context,
+                    active_round_days=active_round_days,
+                )
+                logger.info(
+                    "gemini_json_parse_recovered provider=gemini retries=%s model=%s",
+                    parse_retries,
+                    used_model,
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as second_error:
+                logger.warning(
+                    "gemini_json_parse_failed provider=gemini retries=%s error_type=%s fallback=rules",
+                    parse_retries,
+                    type(second_error).__name__,
+                )
+                raise ValueError(
+                    f"Gemini JSON invalido tras reintento: {type(second_error).__name__}"
+                ) from second_error
 
-        base_url = settings.gemini_url.format(model=settings.gemini_model)
-        url = build_gemini_stream_url(base_url) if settings.gemini_streaming_enabled else base_url
-
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": selected_api_key,
-            },
-            method="POST",
+        extraction = merge_missing_participants(
+            extraction,
+            self._extract_with_mock_rules(
+                message,
+                workday_start,
+                workday_end,
+                active_round_context=active_round_context,
+                active_round_days=active_round_days,
+            ),
         )
 
-        request_started = time.perf_counter()
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=settings.gemini_timeout_seconds,
-            ) as response:
-                if settings.gemini_streaming_enabled:
-                    raw, time_to_first_token_ms = read_gemini_sse(response, request_started)
-                else:
-                    raw = json.loads(response.read().decode("utf-8"))
-                    time_to_first_token_ms = None
-
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-
-            raise GeminiApiError(
-                error.code,
-                detail,
-                parse_retry_delay_seconds(detail),
-            ) from error
-
-        content = extract_gemini_text(raw)
-
-        parsed = json.loads(extract_json(content))
-
-        extraction = parse_extraction_payload(parsed, message, workday_start, workday_end)
-        extraction = merge_missing_participants(extraction, self._extract_with_mock_rules(message, workday_start, workday_end))
-
         usage = raw.get("usageMetadata", {})
-
         prompt_tokens = usage.get("promptTokenCount", 0)
-
         completion_tokens = usage.get("candidatesTokenCount", 0)
-
         total_tokens = usage.get("totalTokenCount", 0)
-
         token_usage = TokenUsage(
-            provider="gemini",
+            provider=f"gemini:{used_model}",
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
@@ -398,14 +595,96 @@ class LlmService:
             ),
             time_to_first_token_ms=time_to_first_token_ms,
         )
-
         return extraction, token_usage
+
+    def _call_gemini_with_model_fallback(
+        self,
+        prompt_text: str,
+        api_key: str,
+    ) -> tuple[dict, int | None, str]:
+        """Call Gemini trying primary model then optional fallback model."""
+        models = gemini_models_for_request()
+        last_error: GeminiApiError | None = None
+        for index, model in enumerate(models):
+            try:
+                raw, ttft = self._call_gemini_raw(prompt_text, api_key, model=model)
+                if index > 0:
+                    logger.info(
+                        "gemini_model_fallback_used primary=%s fallback=%s",
+                        models[0],
+                        model,
+                    )
+                return raw, ttft, model
+            except GeminiApiError as error:
+                last_error = error
+                if is_incompatible_gemini_model_error(error) and index < len(models) - 1:
+                    logger.warning(
+                        "gemini_model_unavailable model=%s status=%s trying_next_model",
+                        model,
+                        error.status_code,
+                    )
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise GeminiApiError(503, "No hay modelos Gemini configurados.")
+
+    def _call_gemini_raw(
+        self,
+        prompt_text: str,
+        api_key: str,
+        model: str | None = None,
+    ) -> tuple[dict, int | None]:
+        model_name = (model or settings.gemini_model).strip()
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt_text}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
+        base_url = settings.gemini_url.format(model=model_name)
+        url = build_gemini_stream_url(base_url) if settings.gemini_streaming_enabled else base_url
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
+            method="POST",
+        )
+        request_started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=settings.gemini_timeout_seconds,
+            ) as response:
+                if settings.gemini_streaming_enabled:
+                    return read_gemini_sse(response, request_started)
+                raw = json.loads(response.read().decode("utf-8"))
+                return raw, None
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise GeminiApiError(
+                error.code,
+                detail,
+                parse_retry_delay_seconds(detail),
+            ) from error
 
     def _extract_with_gemini_pool(
         self,
         message: str,
         workday_start: int,
         workday_end: int,
+        group_memory: str | None = None,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
     ) -> tuple[ExtractedAvailability, TokenUsage]:
         candidates = llm_key_service.candidate_records()
         if not candidates:
@@ -430,6 +709,9 @@ class LlmService:
                     workday_start,
                     workday_end,
                     api_key=api_key,
+                    group_memory=group_memory,
+                    active_round_context=active_round_context,
+                    active_round_days=active_round_days,
                 )
                 llm_key_service.mark_success(credential_id, result[1])
                 logger.info(
@@ -481,10 +763,12 @@ class LlmService:
         record = llm_key_service.get_record(credential_id)
         try:
             api_key = llm_key_service.reveal_secret(record)
-            self._probe_gemini_key(api_key)
+            used_model = self._probe_gemini_key(api_key)
             llm_key_service.mark_success(credential_id)
-            llm_key_service.audit_test(record, actor, "ok")
-            return {"ok": True, "key": llm_key_service.public_record(credential_id)}
+            result = "ok" if used_model == settings.gemini_model else f"ok_fallback:{used_model}"
+            llm_key_service.audit_test(record, actor, result)
+            public = llm_key_service.public_record(credential_id)
+            return {"ok": True, "key": public, "model_used": used_model}
         except CredentialEncryptionError:
             llm_key_service.mark_invalid(credential_id, 500)
             llm_key_service.audit_test(record, actor, "decrypt_error")
@@ -508,8 +792,30 @@ class LlmService:
             llm_key_service.audit_test(record, actor, result)
             return {"ok": False, "key": llm_key_service.public_record(credential_id)}
 
-    def _probe_gemini_key(self, api_key: str) -> None:
-        model_url = settings.gemini_url.format(model=settings.gemini_model)
+    def _probe_gemini_key(self, api_key: str) -> str:
+        """Return the model name that accepted a minimal generateContent probe."""
+        last_error: GeminiApiError | None = None
+        for index, model in enumerate(gemini_models_for_request()):
+            try:
+                self._probe_gemini_key_on_model(api_key, model)
+                if index > 0:
+                    logger.info(
+                        "gemini_probe_fallback_used primary=%s fallback=%s",
+                        settings.gemini_model,
+                        model,
+                    )
+                return model
+            except GeminiApiError as error:
+                last_error = error
+                if is_incompatible_gemini_model_error(error) and index < len(gemini_models_for_request()) - 1:
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise GeminiApiError(503, "No hay modelos Gemini configurados.")
+
+    def _probe_gemini_key_on_model(self, api_key: str, model: str) -> None:
+        model_url = settings.gemini_url.format(model=model)
         payload = {
             "contents": [
                 {
@@ -560,12 +866,14 @@ class LlmService:
         self._gemini_blocked_until = time.monotonic() + max(seconds, 1)
         self._gemini_block_reason = reason
         logger.warning("Gemini provider paused for %s seconds. %s", seconds, reason)
-    
+
     def _extract_with_mock_rules(
         self,
         message: str,
         workday_start: int = WORKDAY_START_HOUR,
         workday_end: int = WORKDAY_END_HOUR,
+        active_round_context: str | None = None,
+        active_round_days: list[str] | None = None,
     ) -> ExtractedAvailability:
         participants: dict[str, Participant] = {}
         removals: list[AvailabilityRemoval] = []
@@ -599,7 +907,13 @@ class LlmService:
             ],
         )
         extraction = apply_exclusive_availability_overrides(extraction, message, workday_start, workday_end)
-        return apply_cross_day_availability_overrides(extraction, message, workday_start, workday_end)
+        extraction = apply_cross_day_availability_overrides(extraction, message, workday_start, workday_end)
+        return discard_ungrounded_days(
+            extraction,
+            message,
+            active_round_context=active_round_context,
+            active_round_days=active_round_days,
+        )
 
     def _remember(
         self,
@@ -607,7 +921,9 @@ class LlmService:
         extraction: ExtractedAvailability,
         source: str,
         token_usage: TokenUsage | None = None,
+        group_memory: GroupMemoryContext | None = None,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
+        extraction = apply_memory_identity(extraction, group_memory)
         if settings.llm_cache_enabled:
             if len(self._cache) >= settings.llm_cache_max_items:
                 oldest_key = next(iter(self._cache))
@@ -805,16 +1121,32 @@ def parse_extraction_payload(
     message: str,
     workday_start: int = WORKDAY_START_HOUR,
     workday_end: int = WORKDAY_END_HOUR,
+    active_round_context: str | None = None,
+    active_round_days: list[str] | None = None,
 ) -> ExtractedAvailability:
     """Parsea la salida del LLM: esquema semantico nuevo (entries) o legacy
     (participants/removals) como red de seguridad si el modelo no siguio el formato."""
     if isinstance(parsed, dict) and "entries" in parsed:
         interpretation = ScheduleInterpretation.model_validate(parsed)
         extraction = compile_interpretation(interpretation, workday_start, workday_end)
-        return normalize_llm_extraction(extraction, message, workday_start, workday_end)
+        return normalize_llm_extraction(
+            extraction,
+            message,
+            workday_start,
+            workday_end,
+            active_round_context=active_round_context,
+            active_round_days=active_round_days,
+        )
 
     extraction = ExtractedAvailability.model_validate(parsed)
-    return normalize_llm_extraction(extraction, message, workday_start, workday_end)
+    return normalize_llm_extraction(
+        extraction,
+        message,
+        workday_start,
+        workday_end,
+        active_round_context=active_round_context,
+        active_round_days=active_round_days,
+    )
 
 
 def extraction_person_names(extraction: ExtractedAvailability) -> set[str]:
@@ -1374,7 +1706,10 @@ def build_extraction_prompt(
     now: datetime | None = None,
     workday_start: int = WORKDAY_START_HOUR,
     workday_end: int = WORKDAY_END_HOUR,
+    group_memory: GroupMemoryContext | str | None = None,
 ) -> str:
+    memory_block = resolve_memory_prompt_block(group_memory)
+    memory_section = f"{memory_block}\n\n" if memory_block else ""
     return (
         f"{EXTRACTION_PROMPT.strip()}\n\n"
         "Ventana horaria configurada para ESTA coordinacion:\n"
@@ -1383,6 +1718,7 @@ def build_extraction_prompt(
         "- start/end null significan estos limites configurados.\n"
         "- Nunca inventes disponibilidad fuera de esta ventana.\n\n"
         f"{build_temporal_context(now)}\n\n"
+        f"{memory_section}"
         "Texto a analizar:\n"
         f"{message}\n\n"
         "Respuesta esperada: solo el objeto JSON valido, sin markdown, sin explicaciones."
@@ -1507,7 +1843,18 @@ def detect_slots(
     normalized = normalize(fragment)
     days = detect_days(normalized)
     if not days:
-        return []
+        # Time-only fragment ("puedo a las 7"): anchor to today's workday in Python.
+        from app.services.temporal_grounding import (
+            _current_or_next_workday,
+            _message_has_time_anchor,
+        )
+
+        if _message_has_time_anchor(normalized):
+            default_day = _current_or_next_workday()
+            if default_day:
+                days = [default_day]
+        if not days:
+            return []
 
     range_hours = detect_time_range(normalized)
     if range_hours:
@@ -1562,7 +1909,16 @@ def detect_slots(
         start_hour = hour
         end_hour = hour + 1
 
-    return slots_in_workday(days, start_hour, end_hour, workday_start, workday_end)
+    # If the user named an evening hour past the configured window (common in
+    # WhatsApp: "a las 7" → 19:00 with workday ending 18:00), extend the window
+    # just enough for this fragment so the slot is not silently dropped.
+    effective_end = workday_end
+    if end_hour > workday_end:
+        effective_end = min(max(end_hour, workday_end), 23)
+    if start_hour >= workday_end and start_hour < 23:
+        effective_end = max(effective_end, min(start_hour + 1, 23))
+
+    return slots_in_workday(days, start_hour, end_hour, workday_start, effective_end)
 
 
 def slots_in_workday(
@@ -1934,6 +2290,7 @@ def build_cache_key(
     message: str,
     workday_start: int = WORKDAY_START_HOUR,
     workday_end: int = WORKDAY_END_HOUR,
+    memory_fingerprint: str = "none",
 ) -> str:
     provider_model = {
         "local": settings.local_llm_model,
@@ -1944,9 +2301,10 @@ def build_cache_key(
     # La fecha entra en la clave: "manana" cambia de dia real cada dia, cachear
     # sin fecha reutilizaria una interpretacion relativa desactualizada.
     today = _timezone_now().strftime("%Y-%m-%d")
+    fingerprint = (memory_fingerprint or "none").strip() or "none"
     return (
         f"{settings.llm_provider}:{provider_model}:{today}:"
-        f"{workday_start:02d}-{workday_end:02d}:{normalized_message}"
+        f"{workday_start:02d}-{workday_end:02d}:{fingerprint}:{normalized_message}"
     )
 
 
@@ -1992,6 +2350,8 @@ def normalize_llm_extraction(
     original_message: str,
     workday_start: int = WORKDAY_START_HOUR,
     workday_end: int = WORKDAY_END_HOUR,
+    active_round_context: str | None = None,
+    active_round_days: list[str] | None = None,
 ) -> ExtractedAvailability:
     first_person = looks_like_first_person_message(original_message)
     invalid_names = {"", "el", "la", "los", "las", "un", "una", "al", "del", "no", "nos"}
@@ -2017,7 +2377,12 @@ def normalize_llm_extraction(
     extraction = apply_grounded_availability_overrides(extraction, original_message, workday_start, workday_end)
     extraction = apply_exclusive_availability_overrides(extraction, original_message, workday_start, workday_end)
     extraction = apply_cross_day_availability_overrides(extraction, original_message, workday_start, workday_end)
-    extraction = discard_ungrounded_days(extraction, original_message)
+    extraction = discard_ungrounded_days(
+        extraction,
+        original_message,
+        active_round_context=active_round_context,
+        active_round_days=active_round_days,
+    )
     return ground_extraction_to_message(extraction, original_message, first_person)
 
 
@@ -2061,49 +2426,33 @@ def discard_invalid_names(extraction: ExtractedAvailability, invalid_names: set[
     )
 
 
-def discard_ungrounded_days(extraction: ExtractedAvailability, original_message: str) -> ExtractedAvailability:
-    allowed_days = set(detect_days(original_message))
-    # Un rango explicito martes-jueves fundamenta tambien el miercoles. Solo se
-    # amplian dias cuando ambos extremos fueron reconocidos y estan en orden.
-    for day_range in find_cross_day_ranges(original_message):
-        allowed_days.update(_days_in_cross_day_range(day_range))
-    if not allowed_days:
-        return extraction
+def discard_ungrounded_days(
+    extraction: ExtractedAvailability,
+    original_message: str,
+    active_round_context: str | None = None,
+    active_round_days: list[str] | None = None,
+) -> ExtractedAvailability:
+    """Reject day-bound slots that are not grounded in message or active round.
 
-    preserve_exclusive_removals = has_exclusive_week_constraint(original_message)
-    exclusive_participants = {
-        normalize(participant.name)
-        for participant in extraction.participants
-        if any(slot.day in allowed_days for slot in participant.availability)
-    }
+    Historical RAG decisions are never used as temporal grounding.
+    """
+    from app.services.temporal_grounding import validate_extracted_temporal_grounding
 
-    participants: list[Participant] = []
-    for participant in extraction.participants:
-        grounded_slots = [slot for slot in participant.availability if slot.day in allowed_days]
-        if grounded_slots or not participant.availability:
-            participants.append(participant.model_copy(update={"availability": grounded_slots}))
-
-    removals: list[AvailabilityRemoval] = []
-    for removal in extraction.removals:
-        participant_key = normalize(removal.participant_name)
-        keep_week_removals = preserve_exclusive_removals and (
-            not exclusive_participants or participant_key in exclusive_participants
+    result = validate_extracted_temporal_grounding(
+        extraction,
+        original_message,
+        active_round_context=active_round_context,
+        active_round_days=active_round_days,
+    )
+    if result.rejected_days:
+        logger.info(
+            "temporal_grounding source=%s rejected_days=%s allowed_days=%s flags=%s",
+            result.grounding_source,
+            result.rejected_days,
+            sorted(result.allowed_days),
+            result.flags,
         )
-        grounded_slots = [
-            slot
-            for slot in removal.slots
-            if slot.day in allowed_days or keep_week_removals
-        ]
-        if grounded_slots:
-            removals.append(removal.model_copy(update={"slots": grounded_slots}))
-
-    implied: list[ImpliedAvailability] = []
-    for item in extraction.implied:
-        grounded_slots = [slot for slot in item.slots if slot.day in allowed_days]
-        if grounded_slots:
-            implied.append(item.model_copy(update={"slots": grounded_slots}))
-
-    return extraction.model_copy(update={"participants": participants, "removals": removals, "implied": implied})
+    return result.extraction
 
 
 _CHANNEL_MENTION_PATTERN = re.compile(r"(?<![\w@])@([^\s,;:!?()\[\]{}]+)", re.UNICODE)
@@ -2146,21 +2495,92 @@ def channel_sender_aliases(messages: list[ChannelMessage]) -> dict[str, str]:
     return aliases
 
 
+def is_usable_channel_display_name(name: str | None) -> bool:
+    """True si el texto puede mostrarse como nombre de persona en el grupo.
+
+    Rechaza placeholders internos, JIDs, telefonos y etiquetas solo numericas.
+    WhatsApp a veces inserta el LID (`@119048071307283`) en vez del nombre
+    visible; eso no debe filtrarse al mensaje del bot.
+    """
+
+    cleaned = " ".join((name or "").strip().split())
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in {"participante", "agente", "contacto mencionado", "yo"}:
+        return False
+    if cleaned.endswith("@s.whatsapp.net") or cleaned.endswith("@lid") or cleaned.endswith("@c.us"):
+        return False
+    if re.fullmatch(r"\d{5,}(?:@\S+)?", cleaned):
+        return False
+    if re.fullmatch(r"Contacto [A-F0-9]{4}", cleaned, flags=re.IGNORECASE):
+        return False
+    return bool(re.search(r"[^\W\d_]", cleaned, flags=re.UNICODE))
+
+
+def build_channel_identity_display_names(messages: list[ChannelMessage]) -> dict[str, str]:
+    """Indice identidad WhatsApp -> pushName humano visto en el canal.
+
+    Usa el nombre publico (`sender` / pushName) de cada mensaje humano y lo
+    asocia a todos sus aliases (PN y LID). Asi una mencion numerica posterior
+    del mismo JID puede mostrarse como Gabriel en vez de "Contacto mencionado".
+    """
+
+    names: dict[str, str] = {}
+    for message in messages:
+        if message.kind != "human":
+            continue
+        if not is_usable_channel_display_name(message.sender):
+            continue
+        display_name = normalize_person_name(message.sender.strip())
+        for identity in channel_identity_values([message.sender_id, *message.sender_aliases]):
+            existing = names.get(identity)
+            if existing is None or not is_usable_channel_display_name(existing):
+                names[identity] = display_name
+    return names
+
+
+def resolve_display_name_for_identities(
+    identities: list[str] | tuple[str, ...],
+    display_names: dict[str, str],
+    *,
+    fallback: str = "Contacto mencionado",
+) -> str:
+    for identity in channel_identity_values(tuple(identities)):
+        candidate = display_names.get(identity)
+        if candidate and is_usable_channel_display_name(candidate):
+            return candidate
+    return fallback
+
+
 def prepare_channel_messages(messages: list[ChannelMessage]) -> list[PreparedChannelMessage]:
     sender_tokens = channel_sender_aliases(messages)
+    display_names = build_channel_identity_display_names(messages)
     prepared_messages: list[PreparedChannelMessage] = []
     for index, message in enumerate(messages):
         if message.kind != "human":
             continue
 
         sender_ids = channel_identity_values([message.sender_id, *message.sender_aliases])
+        sender_display = normalize_person_name(message.sender.strip())
+        if not is_usable_channel_display_name(sender_display):
+            sender_display = resolve_display_name_for_identities(
+                sender_ids,
+                display_names,
+                fallback=sender_display or "Participante",
+            )
         sender = ChannelIdentityBinding(
             token=sender_tokens.get(message.id, message.sender.strip()),
-            display_name=normalize_person_name(message.sender.strip()),
+            display_name=sender_display,
             external_ids=tuple(sender_ids),
         )
         text = remove_invocation_tokens(message.text)
-        text, mention, ambiguous = prepare_verified_mention(message, index, text)
+        text, mention, ambiguous = prepare_verified_mention(
+            message,
+            index,
+            text,
+            display_names=display_names,
+        )
         rewritten = rewrite_first_person_availability(sender.token, text)
         is_self_report = (
             normalize(rewritten) != normalize(text)
@@ -2190,6 +2610,7 @@ def prepare_verified_mention(
     message: ChannelMessage,
     message_index: int,
     text: str,
+    display_names: dict[str, str] | None = None,
 ) -> tuple[str, ChannelIdentityBinding | None, bool]:
     mentioned_ids = channel_identity_values(tuple(message.mentioned_jids))
     if not mentioned_ids:
@@ -2207,10 +2628,17 @@ def prepare_verified_mention(
     raw_label = match.group(1).strip()
     digest = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:8]
     token = f"Mencionado{message_index}x{digest}"
-    if re.search(r"[^\W\d_]", raw_label, flags=re.UNICODE):
+    if is_usable_channel_display_name(raw_label):
         display_name = normalize_person_name(raw_label)
     else:
-        display_name = f"Contacto {digest[:4].upper()}"
+        # WhatsApp a menudo deja el LID numerico en el texto (`@1190...`).
+        # Si ya vimos el pushName de ese JID en el canal, usarlo; si no, el
+        # placeholder generico. La identidad tecnica sigue siendo el JID.
+        display_name = resolve_display_name_for_identities(
+            [external_id],
+            display_names or {},
+            fallback="Contacto mencionado",
+        )
     replaced = f"{text[:match.start()]}{token}{text[match.end():]}"
     return (
         replaced,
@@ -2516,10 +2944,22 @@ def is_invalid_gemini_key_error(error: GeminiApiError) -> bool:
 
 
 def is_incompatible_gemini_model_error(error: GeminiApiError) -> bool:
-    # generateContent identifica el modelo en la propia ruta; un 404 en esta
-    # llamada significa que el modelo configurado no esta disponible para el
-    # proyecto asociado a esa credencial, aunque la API key sea valida.
+    # generateContent con 404: modelo no usable para esa key (p. ej. "no longer
+    # available to new users"), recurso no encontrado o parametro invalido.
+    # No implica por si solo que el modelo no exista en el catalogo global.
     return error.status_code == 404
+
+
+def gemini_models_for_request() -> list[str]:
+    """Primary Gemini model first, then optional fallback (e.g. flash-lite-latest)."""
+    models: list[str] = []
+    primary = (settings.gemini_model or "").strip()
+    if primary:
+        models.append(primary)
+    fallback = (settings.gemini_model_fallback or "").strip()
+    if fallback and fallback not in models:
+        models.append(fallback)
+    return models
 
 
 def gemini_quota_cooldown_seconds(error: GeminiApiError, credential: dict) -> int:
@@ -2564,10 +3004,49 @@ def redact_sensitive_text(value: str) -> str:
 
 
 def extract_json(content: str) -> str:
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
+    """Extract a single top-level JSON object from model text.
+
+    Accepts optional markdown fences. Does not repair truncated/invalid JSON.
+    """
+    text = (content or "").strip()
+    if not text:
         raise ValueError("LLM response does not contain JSON")
-    return match.group(0)
+
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidate = fence.group(1).strip()
+        json.loads(candidate)  # validate
+        return candidate
+
+    # Prefer balanced object starting at first '{'
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("LLM response does not contain JSON")
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : index + 1]
+                json.loads(candidate)
+                return candidate
+    raise ValueError("LLM response does not contain JSON")
 
 
 def build_gemini_stream_url(url: str) -> str:

@@ -156,7 +156,7 @@ def test_429_rotates_to_next_key_and_sets_cooldown(key_service, monkeypatch):
     llm = LlmService()
     attempts = []
 
-    def fake_extract(message, start, end, api_key=None):
+    def fake_extract(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         attempts.append(api_key)
         if api_key == "AIza-first-key-123456":
             raise GeminiApiError(429, '{"error":{"status":"RESOURCE_EXHAUSTED"}}', 30)
@@ -184,7 +184,7 @@ def test_404_model_incompatible_rotates_and_only_business_success_counts_usage(
     llm = LlmService()
     attempts = []
 
-    def model_missing_then_success(message, start, end, api_key=None):
+    def model_missing_then_success(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         attempts.append(api_key)
         if api_key == "AIza-first-key-123456":
             raise GeminiApiError(
@@ -210,7 +210,11 @@ def test_404_model_incompatible_rotates_and_only_business_success_counts_usage(
     assert successful["request_count"] == 1
     assert successful["total_tokens"] == 15
     assert successful["ttft_sample_count"] == 1
-    assert [item["id"] for item in service.candidate_records()] == [second["id"]]
+    # Con GEMINI_MODEL_FALLBACK activo, las llaves incompatible siguen en el pool
+    # para reintentar con el modelo alternativo.
+    candidate_ids = [item["id"] for item in service.candidate_records()]
+    assert second["id"] in candidate_ids
+    assert first["id"] in candidate_ids
 
 
 def test_probe_uses_real_generation_and_does_not_accept_metadata_false_positive(
@@ -255,7 +259,8 @@ def test_probe_uses_real_generation_and_does_not_accept_metadata_false_positive(
     result = LlmService().test_gemini_credential(created["id"], "admin")
 
     assert result["ok"] is False
-    assert methods == ["POST"]
+    # Un POST por modelo de la cadena (principal + fallback).
+    assert methods == ["POST", "POST"]
     assert payloads[0]["contents"][0]["parts"][0]["text"]
     tested = result["key"]
     assert tested["status"] == "incompatible"
@@ -318,7 +323,7 @@ def test_invalid_key_rotates_but_503_does_not_burn_next_key(key_service, monkeyp
     llm = LlmService()
     attempts = []
 
-    def invalid_then_success(message, start, end, api_key=None):
+    def invalid_then_success(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         attempts.append(api_key)
         if api_key == "AIza-first-key-123456":
             raise GeminiApiError(403, "PERMISSION_DENIED")
@@ -332,7 +337,7 @@ def test_invalid_key_rotates_but_503_does_not_burn_next_key(key_service, monkeyp
     service.update(first["id"], name=None, priority=None, enabled=True, actor="admin")
     attempts.clear()
 
-    def unavailable(message, start, end, api_key=None):
+    def unavailable(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         attempts.append(api_key)
         raise GeminiApiError(503, "UNAVAILABLE")
 
@@ -353,7 +358,7 @@ def test_invalid_request_does_not_rotate_and_all_429_exhaust_pool(key_service, m
     llm = LlmService()
     attempts = []
 
-    def invalid_request(message, start, end, api_key=None):
+    def invalid_request(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         attempts.append(api_key)
         raise GeminiApiError(400, "INVALID_ARGUMENT")
 
@@ -363,7 +368,7 @@ def test_invalid_request_does_not_rotate_and_all_429_exhaust_pool(key_service, m
     assert invalid.value.status_code == 400
     assert attempts == ["AIza-first-key-123456"]
 
-    def quota(message, start, end, api_key=None):
+    def quota(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
         raise GeminiApiError(429, "RESOURCE_EXHAUSTED", 30)
 
     monkeypatch.setattr(llm, "_extract_with_gemini", quota)
@@ -409,7 +414,7 @@ def test_concurrent_quota_rotation_remains_usable(key_service, monkeypatch):
     def run_once(_):
         llm = LlmService()
 
-        def fake_extract(message, start, end, api_key=None):
+        def fake_extract(message, start, end, api_key=None, group_memory=None, active_round_context=None, active_round_days=None):
             if api_key == "AIza-first-key-123456":
                 raise GeminiApiError(429, "RESOURCE_EXHAUSTED", 30)
             return successful_result()

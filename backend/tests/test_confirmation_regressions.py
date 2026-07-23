@@ -166,13 +166,8 @@ def test_whatsapp_confirmation_reports_fallback_blocker_before_stale_revision(cl
     assert body["session"]["selected_option"] is None
 
 
-def test_whatsapp_missing_revision_uses_current_revision_instead_of_fixed_r3(client):
-    session_id, _ = _prepare_group(client)
-    stored = session_module.repository.get(session_id)
-    assert stored is not None
-    stored.proposal_revision = 11
-    session_module.repository.save(stored)
-
+def test_whatsapp_confirmation_without_revision_uses_current_proposal(client):
+    session_id, calculated = _prepare_group(client)
     response = client.post(
         f"/api/sessions/{session_id}/channel/messages",
         json={
@@ -184,11 +179,35 @@ def test_whatsapp_missing_revision_uses_current_revision_instead_of_fixed_r3(cli
 
     assert response.status_code == 200
     body = response.json()
-    reply = body["agent_reply"] or ""
-    assert "Falta la revision" in reply
-    assert "@coordina confirmar 1 R11" in reply
-    assert "@coordina confirmar 1 R3" not in reply
-    assert body["session"]["selected_option"] is None
+    assert body["session"]["selected_option"]["id"] == calculated["options"][0]["id"]
+    assert "Decision confirmada" in (body["agent_reply"] or "")
+
+
+def test_no_new_availability_processing_does_not_block_confirmation(client):
+    session_id, calculated = _prepare_group(client)
+    stored = session_module.repository.get(session_id)
+    assert stored is not None
+    stored.last_processing = ProcessingSummary(
+        source="channel_no_new_availability",
+        confidence="low",
+        confidence_label="Baja",
+        detail="No se detectaron datos nuevos de disponibilidad en los mensajes pendientes.",
+    )
+    session_module.repository.save(stored)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={
+            "sender": "Admin",
+            "sender_id": "admin@wa",
+            "text": "@coordina confirmar",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["selected_option"]["id"] == calculated["options"][0]["id"]
+    assert "ultima interpretacion" not in (body["agent_reply"] or "").lower()
 
 
 def test_channel_reply_distinguishes_current_members_from_people_with_availability():
@@ -206,4 +225,3 @@ def test_channel_reply_distinguishes_current_members_from_people_with_availabili
 
     assert "2 integrante(s) actual(es) del grupo" in reply
     assert "4 persona(s) con disponibilidad" in reply
-

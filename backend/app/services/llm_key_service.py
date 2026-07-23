@@ -454,9 +454,14 @@ class LlmKeyService:
     def _is_available(self, record: dict) -> bool:
         if not record.get("enabled", False):
             return False
-        if record.get("status") not in {"ready", "unverified"}:
-            return False
-        return True
+        status = record.get("status")
+        if status in {"ready", "unverified"}:
+            return True
+        # Llaves marcadas incompatible (p. ej. 404 "new users" en el modelo
+        # principal) pueden reintentarse si hay modelo de fallback configurado.
+        if status == "incompatible" and (settings.gemini_model_fallback or "").strip():
+            return True
+        return False
 
     def _public_record(self, record: dict) -> dict:
         # Lista explicita: encrypted_secret y fingerprint nunca pueden filtrarse.

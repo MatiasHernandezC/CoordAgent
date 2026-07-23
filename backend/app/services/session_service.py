@@ -32,6 +32,11 @@ from app.services.calendar_export import (
     option_event_date,
 )
 from app.services.decision_engine import build_availability_matrix, build_insights, find_missing_info, options_from_matrix
+from app.services.llm_service import (
+    build_channel_identity_display_names,
+    is_usable_channel_display_name,
+    resolve_display_name_for_identities,
+)
 from app.settings import settings
 
 # Selector de almacenamiento por DB_BACKEND (postgres por defecto, json como respaldo
@@ -80,7 +85,11 @@ class SessionService:
         return repository.save(session)
 
     def list_sessions(self) -> list[Session]:
-        return repository.list_all()
+        sessions = repository.list_all()
+        for session in sessions:
+            if normalize_generated_contact_labels(session):
+                repository.save(session)
+        return sessions
 
     def resolve_channel_group(
         self,
@@ -153,6 +162,10 @@ class SessionService:
         session = repository.get(session_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        changed = normalize_generated_contact_labels(session)
+        changed = resolve_generated_participant_names(session) or changed
+        if changed:
+            repository.save(session)
         return session
 
     def healthcheck(self) -> None:
@@ -165,6 +178,7 @@ class SessionService:
         original_message: str | None = None,
         source: str | None = None,
         token_usage: TokenUsage | None = None,
+        group_memory=None,
     ) -> Session:
         session = self.get(session_id)
 
@@ -186,12 +200,16 @@ class SessionService:
                 merge_participant_identity(existing, participant_identity_ids(incoming))
                 if is_generated_contact_name(existing.name) and not is_generated_contact_name(incoming.name):
                     existing.name = incoming.name
+                # Si el existente ya tiene nombre humano y la extraccion trae
+                # solo el placeholder de mencion numerica, se conserva el nombre.
                 if participant_key(incoming.name) in replacement_keys:
                     existing.availability = merge_slots([], incoming.availability)
                 else:
                     existing.availability = merge_slots(existing.availability, incoming.availability)
             else:
                 session.participants.append(incoming)
+
+        resolve_generated_participant_names(session)
 
         # Disponibilidad implicita ("no puedo despues de las 16" => puedo antes):
         # solo se aplica en dias donde la persona no declaro nada, para nunca
@@ -248,7 +266,12 @@ class SessionService:
             or extraction.replacements
         )
         refresh_schedule_state(session, clear_decision=has_schedule_update)
-        session.last_processing = build_processing_summary(source, extraction, token_usage)
+        session.last_processing = build_processing_summary(
+            source,
+            extraction,
+            token_usage,
+            group_memory=group_memory,
+        )
         extracted_names = ", ".join(participant.name for participant in extraction.participants) or "sin participantes claros"
         removal_summary = ""
         if removed_names:
@@ -783,7 +806,13 @@ def build_processing_summary(
     source: str | None,
     extraction: ExtractedAvailability,
     token_usage: TokenUsage | None,
+    group_memory=None,
 ) -> ProcessingSummary:
+    from app.services.group_memory import (
+        GroupMemoryContext,
+        format_group_memory_preview,
+    )
+
     source_value = source or "unknown"
     participants_detected = len(extraction.participants)
     removals_detected = sum(1 for removal in extraction.removals if removal.slots)
@@ -791,6 +820,13 @@ def build_processing_summary(
     fallback_used = "fallback" in source_value
     has_new_data = participants_detected > 0 or removals_detected > 0
     quality_flags = list(extraction.quality_flags)
+
+    memory = group_memory if isinstance(group_memory, GroupMemoryContext) else None
+    retrieval_used = bool(memory and memory.has_content())
+    retrieval_source = memory.source if retrieval_used and memory else None
+    retrieval_participant_count = len(memory.known_participants) if memory else 0
+    retrieval_past_decision_count = len(memory.past_decisions) if memory else 0
+    retrieval_preview = format_group_memory_preview(memory) if retrieval_used else ""
 
     if "ambiguous_mentioned_identity" in quality_flags:
         confidence = "low"
@@ -839,6 +875,11 @@ def build_processing_summary(
         cached=cached,
         fallback_used=fallback_used,
         quality_flags=quality_flags,
+        retrieval_used=retrieval_used,
+        retrieval_source=retrieval_source,
+        retrieval_participant_count=retrieval_participant_count,
+        retrieval_past_decision_count=retrieval_past_decision_count,
+        retrieval_preview=retrieval_preview,
     )
 
 
@@ -907,7 +948,166 @@ def participant_identity_ids(participant: Participant) -> list[str]:
 
 
 def is_generated_contact_name(name: str) -> bool:
-    return bool(re.fullmatch(r"Contacto [A-F0-9]{4}", name.strip()))
+    return name.strip().lower() == "contacto mencionado" or bool(
+        re.fullmatch(r"Contacto [A-F0-9]{4}", name.strip())
+    )
+
+
+def resolve_generated_participant_names(session: Session) -> bool:
+    """Sustituye placeholders por pushNames ya vistos en el historial del grupo.
+
+    Caso real: WhatsApp deja `@119048071307283` en el texto, el extractor crea
+    "Contacto mencionado", pero el mismo LID ya hablo antes como "Gabriel".
+    """
+
+    display_names = build_channel_identity_display_names(session.channel_messages)
+    if not display_names:
+        return False
+
+    generated_name_counts: dict[str, int] = {}
+    for participant in session.participants:
+        if is_generated_contact_name(participant.name):
+            generated_name_counts[participant.name] = generated_name_counts.get(participant.name, 0) + 1
+
+    changed = False
+    renames: list[tuple[str, str]] = []
+    for participant in session.participants:
+        if not is_generated_contact_name(participant.name):
+            continue
+        resolved = resolve_display_name_for_identities(
+            participant_identity_ids(participant),
+            display_names,
+            fallback=participant.name,
+        )
+        if resolved != participant.name and is_usable_channel_display_name(resolved):
+            renames.append((participant.name, resolved))
+            participant.name = resolved
+            changed = True
+
+    # Solo reescribe textos cuando el placeholder era unico. Si hubo dos
+    # "Contacto mencionado" distintos, un replace ciego mezclaria personas;
+    # en ese caso las opciones se reconstruyen desde la matriz mas abajo.
+    for old_name, resolved in renames:
+        if generated_name_counts.get(old_name, 0) != 1:
+            continue
+        session.missing_info = [
+            item.replace(old_name, resolved) if isinstance(item, str) else item
+            for item in session.missing_info
+        ]
+        if session.last_agent_reply:
+            session.last_agent_reply = session.last_agent_reply.replace(old_name, resolved)
+        if session.decision_summary and old_name in session.decision_summary:
+            session.decision_summary = session.decision_summary.replace(old_name, resolved)
+        for record in session.decision_history:
+            if old_name in record.summary:
+                record.summary = record.summary.replace(old_name, resolved)
+
+    if renames or _options_have_generated_labels(session):
+        changed = refresh_option_participant_labels(session) or changed
+        if session.status == "confirmed" and session.selected_option:
+            rebuilt = build_confirmed_channel_reply(session)
+            if rebuilt != session.last_agent_reply:
+                session.last_agent_reply = rebuilt
+                changed = True
+            if session.decision_summary and "Contacto mencionado" in session.decision_summary:
+                available = ", ".join(session.selected_option.available_participants)
+                session.decision_summary = (
+                    f"WhatsApp - {session.title}: decision confirmada para "
+                    f"{session.selected_option.day} de {session.selected_option.start} a "
+                    f"{session.selected_option.end}. Asisten: {available}."
+                )
+                changed = True
+    return changed
+
+
+def _options_have_generated_labels(session: Session) -> bool:
+    options = list(session.options)
+    if session.selected_option:
+        options.append(session.selected_option)
+    for record in session.decision_history:
+        options.append(record.option)
+    for option in options:
+        for name in [*option.available_participants, *option.unavailable_participants]:
+            if is_generated_contact_name(name):
+                return True
+        if is_generated_contact_name(option.explanation) or "Contacto mencionado" in option.explanation:
+            return True
+    return "Contacto mencionado" in (session.last_agent_reply or "")
+
+
+def refresh_option_participant_labels(session: Session) -> bool:
+    """Recalcula Asisten/No calzan de opciones con los nombres actuales."""
+
+    matrix = {
+        (cell.week_offset, cell.day, cell.start, cell.end): cell
+        for cell in build_availability_matrix(session)
+    }
+    changed = False
+
+    def refresh(option: TimeOption) -> bool:
+        cell = matrix.get((option.week_offset, option.day, option.start, option.end))
+        if not cell:
+            return False
+        updated = False
+        if option.available_participants != cell.available_participants:
+            option.available_participants = list(cell.available_participants)
+            updated = True
+        if option.unavailable_participants != cell.unavailable_participants:
+            option.unavailable_participants = list(cell.unavailable_participants)
+            updated = True
+        if updated:
+            option.explanation = (
+                f"Asisten {len(option.available_participants)} participante(s): "
+                f"{', '.join(option.available_participants) or 'nadie'}."
+            )
+        return updated
+
+    for option in session.options:
+        changed = refresh(option) or changed
+    if session.selected_option:
+        changed = refresh(session.selected_option) or changed
+    for record in session.decision_history:
+        if refresh(record.option):
+            available = ", ".join(record.option.available_participants)
+            if available and "Asisten:" in record.summary:
+                # Conserva prefijo del summary y solo actualiza la lista final.
+                prefix = record.summary.split("Asisten:", 1)[0]
+                record.summary = f"{prefix}Asisten: {available}."
+            changed = True
+    return changed
+
+
+_GENERATED_CONTACT_LABEL_PATTERN = re.compile(r"\bContacto [A-F0-9]{4}\b", re.IGNORECASE)
+
+
+def normalize_generated_contact_labels(session: Session) -> bool:
+    """Migra etiquetas antiguas sin tocar las identidades técnicas.
+
+    Versiones anteriores mostraban los primeros cuatro caracteres del hash de
+    un JID como nombre (por ejemplo, ``Contacto 5000``). Ese valor nunca fue
+    un nombre de WhatsApp y puede confundir al grupo. La migración recorre la
+    sesión completa para que panel, respuestas y auditoría queden coherentes.
+    """
+
+    data = session.model_dump(mode="python")
+    changed = False
+
+    def replace(value):
+        nonlocal changed
+        if isinstance(value, str):
+            replacement = _GENERATED_CONTACT_LABEL_PATTERN.sub("Contacto mencionado", value)
+            changed = changed or replacement != value
+            return replacement
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    migrated = Session.model_validate(replace(data))
+    if changed:
+        session.__dict__.update(migrated.__dict__)
+    return changed
 
 
 def canonical_external_id(values: list[str]) -> str | None:
@@ -986,7 +1186,15 @@ def confirmation_blockers(session: Session) -> list[str]:
         blockers.append("Hay una mención ambigua; reenvíenla mencionando a una sola persona por mensaje.")
     elif "third_party_requires_mention" in identity_flags:
         blockers.append("Hay horarios de terceros descartados; reenvíenlos usando una mención real de WhatsApp.")
-    elif processing and (processing.confidence == "low" or processing.fallback_used):
+    # Una invocacion de comando sin disponibilidad nueva se registra con
+    # confianza baja porque no hubo nada que interpretar. Eso no invalida una
+    # propuesta ya calculada: bloquear aqui hacia que ``@coordina confirmar``
+    # fallara aunque la ultima propuesta fuera completamente valida.
+    elif (
+        processing
+        and processing.source != "channel_no_new_availability"
+        and (processing.confidence == "low" or processing.fallback_used)
+    ):
         blockers.append("La ultima interpretacion debe revisarse o repetirse con el LLM principal.")
     return blockers
 
@@ -1120,8 +1328,10 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
             lines.append("*Aun no se puede confirmar con seguridad*")
             lines.extend(f"- {item}" for item in blockers)
         else:
-            revision = f" {proposal_token(session)}" if session.channel_config.group_jid else ""
-            lines.append(f"Para cerrar: escribe *{trigger} confirmar 1{revision}*.")
+            lines.append(
+                f"Para cerrar: escribe *{trigger} confirmar* "
+                f"(o *{trigger} confirmar 2* para otra opcion)."
+            )
     else:
         lines.append("Aun no hay una opcion calculable con la informacion disponible.")
 
@@ -1200,7 +1410,7 @@ def build_help_reply(session: Session) -> str:
             "",
             "*Comandos*",
             f"- *{trigger}*  ·  propone los mejores horarios",
-            f"- *{trigger} confirma* (o _confirma 2_)  ·  cierra la decision y envia el evento al calendario",
+            f"- *{trigger} confirmar* (o _confirmar 2_)  ·  cierra la decision y envia el evento al calendario",
             f"- *{trigger} cancela*  ·  deshace la decision confirmada",
             f"- *{trigger} resumen*  ·  estado actual y opciones",
             f"- *{trigger} faltan*  ·  quienes no han dado su horario",

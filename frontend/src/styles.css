@@ -739,6 +739,12 @@ button.session-row.selected {
   line-height: 1.35;
 }
 
+.ops-card-meta {
+  margin-top: 6px !important;
+  color: #3d6f8c !important;
+  font-size: 11px !important;
+}
+
 .section-title small {
   color: #69767e;
   font-weight: 800;
