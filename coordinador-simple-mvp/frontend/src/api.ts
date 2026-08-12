@@ -175,6 +175,17 @@ export function removeParticipant(sessionId: string, participantName: string) {
   });
 }
 
+export function configureParticipantRequirements(
+  sessionId: string,
+  name: string,
+  changes: { required?: boolean; priority?: number }
+) {
+  return request<{ session: Session }>(`/api/sessions/${sessionId}/participants/requirements`, {
+    method: "POST",
+    body: JSON.stringify({ name, ...changes })
+  });
+}
+
 export function addAvailability(sessionId: string, participantName: string, day: string, start: string, end: string) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/availability`, {
     method: "POST",

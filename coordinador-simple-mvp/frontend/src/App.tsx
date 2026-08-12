@@ -7,6 +7,7 @@ import {
   clearAuth,
   configureChannel,
   confirmOption,
+  configureParticipantRequirements,
   createLlmKey,
   createSession,
   deleteLlmKey,
@@ -422,6 +423,18 @@ export function App() {
     });
   }
 
+  async function handleSetParticipantRequirements(
+    name: string,
+    changes: { required?: boolean; priority?: number }
+  ) {
+    if (!session || session.archived_at) return;
+    await runAction("Guardando requerimientos...", async () => {
+      const response = await configureParticipantRequirements(session.id, name, changes);
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+    });
+  }
+
   async function handleManualAvailability(event: FormEvent) {
     event.preventDefault();
     if (!session || session.archived_at) return;
@@ -641,6 +654,12 @@ export function App() {
                 <Fact label="Con disponibilidad" value={String(session.participants.length)} />
                 <Fact label="Revision vigente" value={`R${session.proposal_revision}`} />
                 <Fact label="Mensajes" value={String(latestMessageCount)} />
+                {session.habitual_slot ? (
+                  <Fact
+                    label="Hora de siempre"
+                    value={`${session.habitual_slot.day} ${session.habitual_slot.start}-${session.habitual_slot.end}`}
+                  />
+                ) : null}
               </div>
 
               <div className="decision-grid">
@@ -771,8 +790,45 @@ export function App() {
                     {session.participants.map((participant) => (
                       <article className="person-row" key={participant.id}>
                         <div>
-                          <strong>{participant.name}</strong>
+                          <strong>
+                            {participant.name}
+                            {participant.required ? " ⭐" : ""}
+                            {participant.priority ? ` (pri ${participant.priority})` : ""}
+                          </strong>
                           <p>{formatSlots(participant.availability)}</p>
+                          <div className="person-controls">
+                            <label className="inline-label">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(participant.required)}
+                                disabled={isBusy || Boolean(session.archived_at)}
+                                onChange={(event) =>
+                                  handleSetParticipantRequirements(participant.name, {
+                                    required: event.target.checked
+                                  })
+                                }
+                              />
+                              Requerido
+                            </label>
+                            <label className="inline-label">
+                              Prioridad
+                              <select
+                                value={participant.priority ?? 0}
+                                disabled={isBusy || Boolean(session.archived_at)}
+                                onChange={(event) =>
+                                  handleSetParticipantRequirements(participant.name, {
+                                    priority: Number(event.target.value)
+                                  })
+                                }
+                              >
+                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => (
+                                  <option key={value} value={value}>
+                                    {value || "—"}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
                         </div>
                         <button
                           className="ghost-button compact"
@@ -803,6 +859,9 @@ export function App() {
                         : ""}
                       {lastProcessing.retrieval_preview ? ` — ${lastProcessing.retrieval_preview}` : ""}
                     </p>
+                  ) : null}
+                  {lastProcessing?.habitual_used ? (
+                    <p className="ops-card-meta">Resolvio "a la hora de siempre" con el horario habitual.</p>
                   ) : null}
                 </div>
                 <div className="ops-card">

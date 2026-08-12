@@ -29,7 +29,15 @@ Comandos soportados en grupos:
 @coordina exportar
 @coordina quitar Ana
 @coordina reinicia historial
+@coordina requerido @Ana          (solo admins del grupo)
+@coordina prioridad @Ana 3        (solo admins del grupo)
+@coordina normal @Ana             (solo admins del grupo)
 ```
+
+Los tres ultimos configuran participantes **requeridos** (deben estar si o si)
+y **pesos de prioridad** (ej. el jefe); el motor determinista pondera el score y
+filtra opciones que dejen fuera a un requerido. Solo responden a las personas
+administradoras del grupo (`coordinator_ids`).
 
 El backend distingue estos comandos antes de llamar al LLM. Asi se ahorran tokens
 y se evitan efectos raros cuando el administrador solo quiere cerrar una opcion
@@ -44,6 +52,11 @@ el extractor no vuelva a usar mensajes de la ronda anterior.
 Cada extraccion tambien guarda `last_processing`, un resumen liviano con fuente,
 confianza, cache/fallback y cantidad de participantes/remociones detectadas. Esto
 ayuda a saber si una respuesta vino de Gemini, cache o reglas de respaldo.
+
+La sesion ademas calcula un **horario habitual** desde `decision_history`: cuando
+alguien escribe "a la hora de siempre", el backend lo reescribe con ese slot
+literal antes del extractor (ver `docs/ARQUITECTURA.md`). La trazabilidad marca
+`habitual_used` cuando se resolvio con memoria.
 
 ## Arquitectura Rapida
 

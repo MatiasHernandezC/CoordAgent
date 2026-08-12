@@ -44,6 +44,9 @@ class GroupMemoryContext(BaseModel):
     known_constraints_summary: list[str] = Field(default_factory=list)
     past_decisions: list[str] = Field(default_factory=list)
     expected_group_size: int | None = None
+    # "Hora de siempre" de la sesion (ej. "martes 10:00-11:00"). Cuando un
+    # mensaje la pide de forma explicita debe tratarse como escrita literal.
+    habitual_slot_label: str | None = None
     retrieved_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     source: str = "session_store"
 
@@ -54,6 +57,7 @@ class GroupMemoryContext(BaseModel):
             or self.identity_hints
             or self.known_constraints_summary
             or self.past_decisions
+            or (self.habitual_slot_label and self.habitual_slot_label.strip())
             or (self.expected_group_size is not None and self.expected_group_size > 0)
         )
 
@@ -81,6 +85,8 @@ def build_group_memory_context(
     if expected is not None and expected <= 0:
         expected = None
 
+    from app.services.habitual_time import habitual_slot_label
+
     return GroupMemoryContext(
         group_name=group_name or None,
         group_jid=group_jid,
@@ -89,6 +95,7 @@ def build_group_memory_context(
         known_constraints_summary=constraints,
         past_decisions=past_decisions,
         expected_group_size=expected,
+        habitual_slot_label=habitual_slot_label(session.habitual_slot),
         source="session_store",
     )
 
@@ -114,6 +121,7 @@ def memory_fingerprint(memory: GroupMemoryContext | str | None) -> str:
         ),
         "past_decisions": list(memory.past_decisions),  # already newest-first; keep order
         "expected_group_size": memory.expected_group_size,
+        "habitual_slot_label": (memory.habitual_slot_label or "").strip().lower(),
         "source": memory.source,
     }
     # Sort keys for stable JSON-like encoding without importing json overhead differently
@@ -133,6 +141,13 @@ def format_group_memory_for_prompt(memory: GroupMemoryContext | None) -> str | N
 
     if memory.group_name:
         lines.append(f"- Grupo: {memory.group_name}")
+    if memory.habitual_slot_label:
+        lines.append(
+            f"- Hora habitual de la sesion: {memory.habitual_slot_label}. "
+            "Cuando el texto diga 'a la hora de siempre', 'como siempre' o "
+            "expresiones equivalentes, usala como si estuviera escrita "
+            "literalmente con ese dia, hora de inicio y hora de fin."
+        )
     if memory.expected_group_size is not None:
         lines.append(f"- Tamaño declarado del grupo: {memory.expected_group_size}")
     if memory.known_participants:
@@ -180,6 +195,8 @@ def format_group_memory_preview(
     parts: list[str] = []
     if memory.group_name:
         parts.append(f"grupo={_redact_sensitive(memory.group_name)}")
+    if memory.habitual_slot_label:
+        parts.append(f"habitual={_redact_sensitive(memory.habitual_slot_label)}")
     if memory.known_participants:
         sample = ", ".join(memory.known_participants[:5])
         extra = len(memory.known_participants) - 5

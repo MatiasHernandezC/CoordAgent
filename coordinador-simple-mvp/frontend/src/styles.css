@@ -688,6 +688,31 @@ button.session-row.selected {
   line-height: 1.35;
 }
 
+.person-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #40535e;
+}
+
+.inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.inline-label select {
+  padding: 2px 4px;
+  border: 1px solid #c7d2ce;
+  border-radius: 5px;
+  background: #fff;
+  color: #101a22;
+  font-size: 13px;
+}
+
 .ops-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -201,6 +201,18 @@ UI en panel: opcional.
 
 ---
 
+## 7b. Extension: hora de siempre
+
+El RAG tambien recupera el **horario habitual** de la sesion
+(`session.habitual_slot`), calculado deterministicamente como el modal de
+`(day, start, end)` de `decision_history`. Cuando el texto pide "a la hora de
+siempre" (o equivalentes), el backend reescribe la frase con el slot literal
+ANTES del extractor, de modo que tanto Gemini como el fallback por reglas
+reciben un dia y horas reales y el grounding temporal las acepta. La memoria
+RAG expone la etiqueta (`habitual=...` en el preview) y la trazabilidad marca
+`habitual_used`. Tras "reinicia historial", el habitual se limpia y solo se
+recomputa con las decisiones de la ronda nueva (`habitual_history_index`).
+
 ## 8. Tests
 
 | Test | Valida |

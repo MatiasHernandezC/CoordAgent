@@ -95,6 +95,10 @@ class Settings:
     llm_cache_enabled: bool = env_bool("LLM_CACHE_ENABLED", True)
     llm_cache_max_items: int = env_int("LLM_CACHE_MAX_ITEMS", 64)
 
+    # Horario habitual ("a la hora de siempre"): minimo de decisiones confirmadas
+    # necesarias para que la sesion tenga un horario habitual computable.
+    habitual_min_decisions: int = env_int("HABITUAL_MIN_DECISIONS", 1)
+
     # Fallback
     llm_fallback_enabled: bool = env_bool("LLM_FALLBACK_ENABLED", True)
 

@@ -30,6 +30,7 @@ from app.services.group_memory import (
     memory_fingerprint,
     resolve_memory_prompt_block,
 )
+from app.services.habitual_time import anchor_habitual_phrase
 from app.services.llm_key_service import llm_key_service
 from app.services.schedule_compiler import compile_interpretation
 from app.settings import settings
@@ -140,8 +141,12 @@ class LlmService:
         group_memory: GroupMemoryContext | str | None = None,
         active_round_context: str | None = None,
         active_round_days: list[str] | None = None,
+        habitual_slot: "TimeSlot | None" = None,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
         validate_workday_window(workday_start, workday_end)
+        # "a la hora de siempre" -> slot literal, antes de cache/prompt/mock y
+        # de calcular el cache key (el mensaje reescrito es parte de la clave).
+        message = anchor_habitual_phrase(message, habitual_slot)
         memory_obj = group_memory if isinstance(group_memory, GroupMemoryContext) else None
         memory_fp = memory_fingerprint(group_memory)
         memory_block = resolve_memory_prompt_block(group_memory)
@@ -354,8 +359,9 @@ class LlmService:
         workday_end: int = WORKDAY_END_HOUR,
         group_memory: GroupMemoryContext | str | None = None,
         active_round_context: str | None = None,
+        habitual_slot: "TimeSlot | None" = None,
     ) -> tuple[ExtractedAvailability, str, TokenUsage | None]:
-        transcript = build_channel_extraction_text(messages)
+        transcript = build_channel_extraction_text(messages, habitual_slot=habitual_slot)
         # Conversation context may fix the active coordination day ("para el jueves").
         round_context = active_round_context or transcript
         if not has_extractable_scheduling_signal(transcript):
@@ -1390,7 +1396,10 @@ def is_unavailability_fragment(fragment: str) -> bool:
     )
 
 
-def build_channel_extraction_text(messages: list[ChannelMessage]) -> str:
+def build_channel_extraction_text(
+    messages: list[ChannelMessage],
+    habitual_slot: "TimeSlot | None" = None,
+) -> str:
     fragments: list[str] = []
     context_day: str | None = None
     for prepared in prepare_channel_messages(messages):
@@ -1404,6 +1413,9 @@ def build_channel_extraction_text(messages: list[ChannelMessage]) -> str:
         # dia habil concreto en el propio texto, para que tanto el LLM como el
         # mock reciban un dia real y no expandan a toda la semana.
         fragment = resolve_relative_days(fragment)
+        # "a la hora de siempre" -> el slot habitual de la sesion, escrito de
+        # forma literal para que LLM/mock/grounding tengan dia y horas reales.
+        fragment = anchor_habitual_phrase(fragment, habitual_slot)
         normalized = normalize(fragment)
 
         explicit_days = detect_days(normalized)

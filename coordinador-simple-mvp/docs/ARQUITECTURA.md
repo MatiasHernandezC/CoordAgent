@@ -147,6 +147,42 @@ extractor; el motor Python decide horarios.
 Limites duros: 40 participantes, 30 pistas de identidad, 20 restricciones y
 3 decisiones previas. El preview de trazabilidad redacts JIDs y numeros largos.
 
+### Hora de siempre (memoria habitual)
+
+Ademas del historial, la sesion guarda un **horario habitual** computado de
+forma determinista a partir de `decision_history`: el modal de
+`(day, start, end)` entre las decisiones confirmadas (empate gana la mas
+reciente; umbral minimo configurable con `HABITUAL_MIN_DECISIONS`). Se recalcula
+al confirmar, cancelar o reiniciar la coordinacion. Cuando un mensaje dice
+"a la hora de siempre" (u otras expresiones equivalentes), el backend reescribe
+la frase con el slot literal antes de llamar al LLM:
+
+```txt
+"yo no puedo a la hora de siempre"  ->  "yo no puedo el martes de 10:00 a 11:00"
+```
+
+Asi el dia y las horas ya estan "en el mensaje": el grounding temporal las
+acepta y el extractor (Gemini o reglas) trabaja con datos reales. El bloque RAG
+tambien expone la "hora habitual" al modelo y la trazabilidad marca
+`habitual_used` en `last_processing`. Si la frase se usa sin historial, el bot
+responde que aun no hay un horario habitual en lugar de inventar uno.
+
+### Prioridades de participantes (requeridos + pesos)
+
+Cada participante puede marcarse como **requerido** (debe estar si o si) y/o
+tener un **peso de prioridad** (ej. el jefe). El motor determinista los usa:
+
+- `weighted_score` = suma de pesos de los disponibles (peso 0 = 1, asi una
+  sesion sin prioridades produce el mismo ranking que antes).
+- Si existe al menos una opcion que cubre a todos los requeridos, SOLO se
+  recomiendan esas; si ninguna los cubre, se muestran las mejores con
+  `required_met=False` y un aviso de quienes quedan fuera.
+- Confirmar una opcion que deja fuera a un requerido queda bloqueado por
+  `confirmation_blockers`.
+- Configuracion desde el panel o por comando de WhatsApp restringido a
+  `channel_config.coordinator_ids` (los admins del grupo): `requerido @Ana`,
+  `prioridad @Ana 3`, `normal @Ana`.
+
 Plan de implementacion: [PLAN_RAG_ESTRUCTURADO.md](PLAN_RAG_ESTRUCTURADO.md).
 
 ## Sesion Por Grupo

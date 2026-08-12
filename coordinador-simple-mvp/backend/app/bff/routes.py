@@ -11,6 +11,7 @@ from app.schemas import (
     ChannelMessageRequest,
     ChannelMessageResponse,
     ConfirmRequest,
+    ConfigureParticipantRequirementsRequest,
     CreateSessionRequest,
     CreateLlmKeyRequest,
     DeleteLlmKeyRequest,
@@ -27,7 +28,8 @@ from app.settings import settings
 from app.services.calendar_export import build_calendar_ics
 from app.services.image_render import render_availability_base64
 from app.services.group_memory import build_group_memory_context
-from app.services.llm_service import LlmUnavailableError, llm_service
+from app.services.habitual_time import detect_habitual_phrase
+from app.services.llm_service import LlmUnavailableError, has_extractable_scheduling_signal, llm_service
 from app.services.llm_key_service import llm_key_service
 from app.services.ops_status import fetch_gateway_status
 from app.services.session_service import (
@@ -39,11 +41,17 @@ from app.services.session_service import (
     build_export_text,
     build_help_reply,
     build_missing_info_reply,
+    build_no_habitual_reply,
     classify_channel_command,
     confirmation_blockers,
+    find_participant,
+    last_invoking_message,
     last_invoking_sender,
+    last_invoking_text,
+    participant_key,
     resolve_reply_format,
     session_service,
+    unique_ids,
 )
 
 router = APIRouter()
@@ -173,6 +181,7 @@ def add_message(session_id: str, payload: MessageRequest):
                 session.channel_config.workday_start_hour,
                 session.channel_config.workday_end_hour,
                 group_memory=group_memory,
+                habitual_slot=session.habitual_slot,
             )
         except LlmUnavailableError as error:
             raise_llm_http_error(error)
@@ -184,6 +193,9 @@ def add_message(session_id: str, payload: MessageRequest):
             source,
             token_usage,
             group_memory=group_memory,
+            habitual_used=bool(
+                detect_habitual_phrase(payload.message) and session.habitual_slot is not None
+            ),
         )
         return MessageResponse(
             session=session,
@@ -203,6 +215,19 @@ def add_participant(session_id: str, payload: AddParticipantRequest):
 def remove_participant(session_id: str, participant_name: str):
     with session_service.session_lock(session_id):
         return {"session": session_service.remove_participant(session_id, participant_name)}
+
+
+@router.post("/sessions/{session_id}/participants/requirements")
+def configure_participant_requirements(session_id: str, payload: ConfigureParticipantRequirementsRequest):
+    with session_service.session_lock(session_id):
+        return {
+            "session": session_service.configure_participant_requirements(
+                session_id,
+                payload.name,
+                required=payload.required,
+                priority=payload.priority,
+            )
+        }
 
 
 @router.post("/sessions/{session_id}/availability")
@@ -385,7 +410,34 @@ def invoke_channel_if_needed(
     if command_response:
         return command_response
 
+    invoking_text = last_invoking_text(session)
     pending_messages = session_service.pending_channel_messages(session)
+    pending_texts = " ".join(message.text for message in pending_messages)
+    has_habitual = detect_habitual_phrase(invoking_text) or detect_habitual_phrase(pending_texts)
+    # "a la hora de siempre" sin horario habitual registrado y sin otra senal
+    # de agenda: no gastar una llamada LLM, responder que se fije un horario.
+    if (
+        detect_habitual_phrase(invoking_text)
+        and session.habitual_slot is None
+        and not has_extractable_scheduling_signal(invoking_text)
+    ):
+        reply = build_no_habitual_reply(session)
+        session = session_service.add_agent_channel_reply(
+            session_id,
+            reply,
+            reply_to_external_id=external_id,
+            reply_format="text",
+        )
+        return ChannelMessageResponse(
+            session=session,
+            invoked=True,
+            llm_source="channel_no_habitual_slot",
+            agent_reply=reply,
+            agent_reply_format="text",
+            elapsed_ms=elapsed_ms(started),
+            duplicate=duplicate,
+        )
+
     group_memory = build_group_memory_context(session)
     try:
         extraction, source, token_usage = llm_service.extract_channel_availability(
@@ -393,10 +445,12 @@ def invoke_channel_if_needed(
             session.channel_config.workday_start_hour,
             session.channel_config.workday_end_hour,
             group_memory=group_memory,
+            habitual_slot=session.habitual_slot,
         )
     except LlmUnavailableError as error:
         raise_llm_http_error(error)
 
+    habitual_used = bool(has_habitual and session.habitual_slot is not None)
     session = session_service.merge_extraction(
         session_id,
         extraction,
@@ -404,6 +458,7 @@ def invoke_channel_if_needed(
         source=source,
         token_usage=token_usage,
         group_memory=group_memory,
+        habitual_used=habitual_used,
     )
     session = session_service.calculate(session_id)
     reply = build_channel_reply(session)
@@ -467,6 +522,26 @@ def invoke_channel_command_if_needed(
             invoked=True,
             llm_source="channel_command",
             agent_reply=session.last_agent_reply,
+            agent_reply_format="text",
+            elapsed_ms=elapsed_ms(started),
+            duplicate=duplicate,
+        )
+
+    if command_name in {"set_required", "set_priority", "clear_requirements"}:
+        reply = execute_requirement_command(session_id, session, command)
+        if not reply:
+            return None
+        session = session_service.add_agent_channel_reply(
+            session_id,
+            reply,
+            reply_to_external_id=external_id,
+            reply_format="text",
+        )
+        return ChannelMessageResponse(
+            session=session,
+            invoked=True,
+            llm_source="channel_command",
+            agent_reply=reply,
             agent_reply_format="text",
             elapsed_ms=elapsed_ms(started),
             duplicate=duplicate,
@@ -663,6 +738,68 @@ def invoke_channel_command_if_needed(
         token_usage=token_usage,
         duplicate=duplicate,
     )
+
+
+def execute_requirement_command(session_id: str, session, command: dict) -> str | None:
+    """Ejecuta un comando de requerimientos/prioridad, gateado a coordinadores."""
+    coordinator_ids = set(session.channel_config.coordinator_ids)
+    invoking = last_invoking_message(session)
+    sender_ids = (
+        set(unique_ids([invoking.sender_id, *(invoking.sender_aliases or [])])) if invoking else set()
+    )
+    is_group = bool(session.channel_config.group_jid)
+    # Las sesiones manuales (sin JID de grupo) se consideran contexto admin;
+    # en un grupo real solo los admins pueden cambiar requerimientos.
+    if is_group and not (coordinator_ids and sender_ids.intersection(coordinator_ids)):
+        return (
+            "*Coordina*\n\n"
+            "Solo las personas administradoras del grupo pueden cambiar requerimientos."
+        )
+
+    participant_name = command.get("participant_name", "")
+    target = next(
+        (
+            participant
+            for participant in session.participants
+            if participant_key(participant.name) == participant_key(participant_name)
+        ),
+        None,
+    )
+    if not target and invoking:
+        mentioned_ids = unique_ids(invoking.mentioned_jids)
+        if len(mentioned_ids) == 1:
+            target = find_participant(
+                session.participants,
+                participant_name,
+                mentioned_ids[0],
+                [mentioned_ids[0]],
+            )
+    if not target:
+        return (
+            "*Coordina*\n\n"
+            f"No encontre a *{participant_name}* en la sesion. Usa *@coordina exportar* para ver la lista."
+        )
+
+    name = target.name
+    action = command["name"]
+    if action == "set_required":
+        session_service.configure_participant_requirements(session_id, name, required=True)
+        return f"Listo: *{name}* quedo marcado/a como *requerido* (debe estar si o si)."
+    if action == "set_priority":
+        priority = min(max(int(command.get("priority", 1)), 0), 10)
+        session_service.configure_participant_requirements(session_id, name, priority=priority)
+        return (
+            f"Listo: prioridad de *{name}* = {priority}."
+            if priority
+            else f"Listo: quite la prioridad de *{name}*."
+        )
+    session_service.configure_participant_requirements(
+        session_id,
+        name,
+        required=False,
+        priority=0,
+    )
+    return f"Listo: *{name}* ya no es requerido ni tiene prioridad."
 
 
 def replay_channel_response(session, saved_reply, started: float) -> ChannelMessageResponse:

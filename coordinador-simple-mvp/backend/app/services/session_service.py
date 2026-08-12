@@ -32,6 +32,7 @@ from app.services.calendar_export import (
     option_event_date,
 )
 from app.services.decision_engine import build_availability_matrix, build_insights, find_missing_info, options_from_matrix
+from app.services.habitual_time import compute_habitual_slot
 from app.services.llm_service import (
     build_channel_identity_display_names,
     is_usable_channel_display_name,
@@ -179,6 +180,7 @@ class SessionService:
         source: str | None = None,
         token_usage: TokenUsage | None = None,
         group_memory=None,
+        habitual_used: bool = False,
     ) -> Session:
         session = self.get(session_id)
 
@@ -271,6 +273,7 @@ class SessionService:
             extraction,
             token_usage,
             group_memory=group_memory,
+            habitual_used=habitual_used,
         )
         extracted_names = ", ".join(participant.name for participant in extraction.participants) or "sin participantes claros"
         removal_summary = ""
@@ -344,6 +347,38 @@ class SessionService:
         if external_id:
             reply = f"Listo: quite a {name} de la sesion.\n\n{build_channel_reply(session)}"
             add_command_receipt(session, external_id, "remove_participant", reply)
+        return repository.save(session)
+
+    def configure_participant_requirements(
+        self,
+        session_id: str,
+        name: str,
+        *,
+        required: bool | None = None,
+        priority: int | None = None,
+    ) -> Session:
+        """Marca a un participante como requerido y/o le asigna peso de prioridad."""
+        session = self.get(session_id)
+        participant = next(
+            (item for item in session.participants if participant_key(item.name) == participant_key(name)),
+            None,
+        )
+        if not participant:
+            raise HTTPException(status_code=404, detail="Participant not found")
+        if required is not None:
+            participant.required = bool(required)
+        if priority is not None:
+            participant.priority = max(0, int(priority))
+        # Cambio de prioridades puede reordenar opciones y decisiones: recalcula
+        # y, si el resultado cambia, limpia la decision anterior (como ya hace
+        # refresh_schedule_state ante cualquier cambio de disponibilidad).
+        refresh_schedule_state(session)
+        session.messages.append(
+            ChatMessage(
+                role="assistant",
+                content=f"Requerimientos de {participant.name} actualizados.",
+            )
+        )
         return repository.save(session)
 
     def calculate(self, session_id: str) -> Session:
@@ -422,6 +457,7 @@ class SessionService:
         session.messages.append(ChatMessage(role="assistant", content=session.decision_summary))
         session.insights = build_insights(session)
         session.status = "confirmed"
+        session.habitual_slot = compute_habitual_slot(session)
         if external_id:
             try:
                 document_text = build_calendar_ics(session)
@@ -447,6 +483,9 @@ class SessionService:
         session.selected_calendar_event = None
         session.decision_summary = None
         session.status = "calculated" if session.options else "draft"
+        # El historial de decisiones sigue existiendo para auditoria; el horario
+        # habitual puede mantenerse o cambiar segun el nuevo modal del historial.
+        session.habitual_slot = compute_habitual_slot(session)
         session.messages.append(ChatMessage(role="assistant", content="Decision cancelada. Puedes confirmar otra opcion."))
         if external_id:
             add_command_receipt(
@@ -648,6 +687,12 @@ class SessionService:
         session.decision_summary = None
         session.archived_at = None
         session.status = "draft"
+        # Reiniciar no usa datos anteriores: el horario habitual de la ronda
+        # previa tampoco aplica a la coordinacion nueva (se recomputara al
+        # confirmar la proxima decision). El indice marca donde empieza la
+        # ronda actual dentro del historial de decisiones conservado.
+        session.habitual_slot = None
+        session.habitual_history_index = len(session.decision_history)
 
         reply = build_reset_channel_reply(session)
         reply_message = ChannelMessage(
@@ -807,6 +852,7 @@ def build_processing_summary(
     extraction: ExtractedAvailability,
     token_usage: TokenUsage | None,
     group_memory=None,
+    habitual_used: bool = False,
 ) -> ProcessingSummary:
     from app.services.group_memory import (
         GroupMemoryContext,
@@ -875,6 +921,7 @@ def build_processing_summary(
         cached=cached,
         fallback_used=fallback_used,
         quality_flags=quality_flags,
+        habitual_used=habitual_used,
         retrieval_used=retrieval_used,
         retrieval_source=retrieval_source,
         retrieval_participant_count=retrieval_participant_count,
@@ -1196,6 +1243,12 @@ def confirmation_blockers(session: Session) -> list[str]:
         and (processing.confidence == "low" or processing.fallback_used)
     ):
         blockers.append("La ultima interpretacion debe revisarse o repetirse con el LLM principal.")
+    # Requeridos: si existen y ninguna opcion los cubre, no se debe confirmar
+    # sin antes revisar (la propuesta vigente avisa quien queda fuera).
+    has_required = any(participant.required for participant in session.participants)
+    if has_required and session.options and not session.options[0].required_met:
+        missing_names = ", ".join(session.options[0].required_missing) or "desconocidos"
+        blockers.append(f"Ninguna opcion incluye a todos los requeridos (faltan: {missing_names}).")
     return blockers
 
 
@@ -1261,12 +1314,21 @@ def build_summary(session: Session, option: TimeOption) -> str:
     )
     if unavailable:
         summary += f" No calzan con este horario: {unavailable}."
+    if _required_names(session):
+        if option.required_met:
+            summary += " Todos los requeridos asistirian."
+        elif option.required_missing:
+            summary += f" No asistirian requeridos: {', '.join(option.required_missing)}."
     return summary
 
 
 def _channel_header(session: Session) -> str:
     name = session.channel_config.group_name
     return f"*Coordina - {name}*" if name else "*Coordina*"
+
+
+def _required_names(session: Session) -> list[str]:
+    return [participant.name for participant in session.participants if participant.required]
 
 
 def _option_line(option: TimeOption, index: int, now: datetime | None = None, detailed: bool = False) -> str:
@@ -1280,6 +1342,7 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
     header = _channel_header(session)
     trigger = session.channel_config.trigger_word
     identity_warning = build_identity_warning(session)
+    required_names = _required_names(session)
 
     if not session.participants:
         warning = f"\n\n{identity_warning}" if identity_warning else ""
@@ -1306,6 +1369,9 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
     lines.append("")
     if identity_warning:
         lines.extend([identity_warning, ""])
+    if required_names:
+        lines.append(f"_Requeridos: {', '.join(required_names)}_")
+        lines.append("")
 
     if session.options:
         best = session.options[0]
@@ -1315,6 +1381,11 @@ def build_channel_reply(session: Session, now: datetime | None = None) -> str:
             lines.append(f"Asisten: {', '.join(best.available_participants)}")
         if best.unavailable_participants:
             lines.append(f"No calzan: {', '.join(best.unavailable_participants)}")
+        if required_names:
+            if best.required_met:
+                lines.append("Requeridos incluidos ✓")
+            else:
+                lines.append(f"⚠ No calza con requerido(s): {', '.join(best.required_missing)}")
 
         others = session.options[1:]
         if others:
@@ -1378,6 +1449,11 @@ def build_confirmed_channel_reply(session: Session, now: datetime | None = None)
         lines.append(f"Asisten: {', '.join(option.available_participants)}")
     if option.unavailable_participants:
         lines.append(f"No calzan: {', '.join(option.unavailable_participants)}")
+    if _required_names(session):
+        if option.required_met:
+            lines.append("Todos los requeridos asistirian.")
+        elif option.required_missing:
+            lines.append(f"⚠ No asistirian requeridos: {', '.join(option.required_missing)}.")
 
     google_url = build_google_calendar_url(session, now)
     if google_url:
@@ -1440,6 +1516,21 @@ def build_reset_channel_reply(session: Session) -> str:
     )
 
 
+def build_no_habitual_reply(session: Session) -> str:
+    return "\n".join(
+        [
+            _channel_header(session),
+            "",
+            "Aun no tengo registrado un *horario habitual* para este grupo.",
+            "En cuanto confirmen una opcion quedara fijado y podran escribir "
+            "simplemente _a la hora de siempre_.",
+            "",
+            "Por ahora escriban el horario concreto, por ejemplo: "
+            "_yo puedo martes de 10 a 11_.",
+        ]
+    )
+
+
 def build_cancelled_channel_reply(session: Session) -> str:
     header = _channel_header(session)
     lines = [header, "", "*Decision cancelada*"]
@@ -1473,11 +1564,17 @@ def build_participant_summary(session: Session) -> str:
 
     lines: list[str] = []
     for participant in sorted(session.participants, key=lambda item: participant_key(item.name)):
+        flags = []
+        if participant.required:
+            flags.append("requerido")
+        if participant.priority:
+            flags.append(f"prioridad {participant.priority}")
+        suffix = f" ({', '.join(flags)})" if flags else ""
         if participant.availability:
             slots = ", ".join(f"{slot.day} {slot.start}-{slot.end}" for slot in participant.availability)
-            lines.append(f"{participant.name}: {slots}")
+            lines.append(f"{participant.name}{suffix}: {slots}")
         else:
-            lines.append(f"{participant.name}: sin disponibilidad")
+            lines.append(f"{participant.name}{suffix}: sin disponibilidad")
     return "\n".join(lines)
 
 
@@ -1503,6 +1600,8 @@ def build_export_text(session: Session) -> str:
             )
             if option.unavailable_participants:
                 lines.append(f"   No calzan: {', '.join(option.unavailable_participants)}")
+            if option.required_missing:
+                lines.append(f"   Faltan requeridos: {', '.join(option.required_missing)}")
     else:
         lines.append("Sin opciones calculadas.")
 
@@ -1543,13 +1642,30 @@ def build_export_csv(session: Session) -> str:
             "cobertura_pct",
             "asisten",
             "no_calzan",
+            "requerido",
+            "prioridad",
         ]
     )
 
     group_name = session.channel_config.group_name or session.title
     for participant in sorted(session.participants, key=lambda item: participant_key(item.name)):
         if not participant.availability:
-            writer.writerow(["disponibilidad", group_name, session.status, participant.name, "", "", "", "", "", ""])
+            writer.writerow(
+                [
+                    "disponibilidad",
+                    group_name,
+                    session.status,
+                    participant.name,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "si" if participant.required else "no",
+                    participant.priority or "",
+                ]
+            )
             continue
 
         for slot in participant.availability:
@@ -1565,6 +1681,8 @@ def build_export_csv(session: Session) -> str:
                     "",
                     "",
                     "",
+                    "si" if participant.required else "no",
+                    participant.priority or "",
                 ]
             )
 
@@ -1581,6 +1699,8 @@ def build_export_csv(session: Session) -> str:
                 option.coverage_percent,
                 ", ".join(option.available_participants),
                 ", ".join(option.unavailable_participants),
+                "si" if option.required_met else "no",
+                option.weighted_score,
             ]
         )
 
@@ -1598,6 +1718,8 @@ def build_export_csv(session: Session) -> str:
                 option.coverage_percent,
                 ", ".join(option.available_participants),
                 ", ".join(option.unavailable_participants),
+                "si" if option.required_met else "no",
+                option.weighted_score,
             ]
         )
 
@@ -1699,6 +1821,10 @@ def classify_channel_command(session: Session) -> dict | None:
     if re.search(r"\b(resumen|estado|status|opciones actuales)\b", command_text):
         return {"name": "summary"}
 
+    requirement_match = _classify_requirement_command(command_text)
+    if requirement_match:
+        return requirement_match
+
     remove_match = re.search(
         r"\b(?:quita|quitar|elimina|eliminar|saca|sacar|olvida|olvidar)\s+"
         r"(?:a\s+)?(?P<mention>@?)(?P<target>[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,7})\s*$",
@@ -1732,6 +1858,53 @@ def classify_channel_command(session: Session) -> dict | None:
             "name": "remove_participant",
             "participant_name": by_identity.name if by_identity else known,
             "target_external_id": target_external_id,
+        }
+
+    return None
+
+
+def _classify_requirement_command(command_text: str) -> dict | None:
+    """Comandos de requerimientos/prioridad (solo administradores del grupo).
+
+    Se evalúan ANTES que remove_participant para que "quitar requerido @Ana"
+    no se interprete como eliminar al participante "requerido @Ana".
+    """
+    priority = re.search(
+        r"\b(?:prioridad|prioricemos|prioriza)\s+(?:a\s+)?"
+        r"(?P<mention>@?)(?P<target>[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,7})"
+        r"\s+(?P<value>\d{1,3})\s*$",
+        command_text,
+    )
+    if priority:
+        return {
+            "name": "set_priority",
+            "participant_name": " ".join(priority.group("target").split()),
+            "mention": priority.group("mention"),
+            "priority": int(priority.group("value")),
+        }
+
+    required = re.search(
+        r"\b(?:requerido|requerida|imprescindible|obligatorio|obligatoria|debe estar)"
+        r"\s+(?:a\s+)?(?P<mention>@?)(?P<target>[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,7})\s*$",
+        command_text,
+    )
+    if required:
+        return {
+            "name": "set_required",
+            "participant_name": " ".join(required.group("target").split()),
+            "mention": required.group("mention"),
+        }
+
+    normal = re.search(
+        r"\b(?:normal|sin prioridad|quitar requerido|quita requerido|ya no es requerido)"
+        r"\s+(?:a\s+)?(?P<mention>@?)(?P<target>[a-z0-9_-]+(?:\s+[a-z0-9_-]+){0,7})\s*$",
+        command_text,
+    )
+    if normal:
+        return {
+            "name": "clear_requirements",
+            "participant_name": " ".join(normal.group("target").split()),
+            "mention": normal.group("mention"),
         }
 
     return None

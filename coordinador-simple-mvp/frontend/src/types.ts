@@ -4,6 +4,7 @@ export type TimeSlot = {
   day: Day;
   start: string;
   end: string;
+  week_offset?: number;
 };
 
 export type Participant = {
@@ -11,6 +12,8 @@ export type Participant = {
   name: string;
   external_id?: string | null;
   availability: TimeSlot[];
+  required?: boolean;
+  priority?: number;
 };
 
 export type TimeOption = {
@@ -23,6 +26,9 @@ export type TimeOption = {
   score: number;
   coverage_percent: number;
   explanation: string;
+  weighted_score?: number;
+  required_met?: boolean;
+  required_missing?: string[];
 };
 
 export type ProcessingSummary = {
@@ -35,6 +41,7 @@ export type ProcessingSummary = {
   cached: boolean;
   fallback_used: boolean;
   quality_flags: string[];
+  habitual_used?: boolean;
   retrieval_used?: boolean;
   retrieval_source?: string | null;
   retrieval_participant_count?: number;
@@ -63,6 +70,9 @@ export type AvailabilityCell = {
   unavailable_participants: string[];
   score: number;
   coverage_percent: number;
+  weighted_score?: number;
+  required_met?: boolean;
+  required_missing?: string[];
 };
 
 export type TokenUsage = {
@@ -155,6 +165,8 @@ export type Session = {
   decision_history: DecisionRecord[];
   archived_at: string | null;
   status: "draft" | "calculated" | "confirmed";
+  habitual_slot?: TimeSlot | null;
+  habitual_history_index?: number | null;
 };
 
 export type RuntimeInfo = {

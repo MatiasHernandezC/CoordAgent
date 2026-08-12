@@ -11,17 +11,46 @@ def calculate_options(session: Session) -> list[TimeOption]:
     return options_from_matrix(build_availability_matrix(session))
 
 
+def _requirement_profile(session: Session) -> tuple[dict[str, int], set[str]]:
+    """(peso por participante, nombres requeridos). Peso 0/ausente -> 1."""
+    weights: dict[str, int] = {}
+    required: set[str] = set()
+    for participant in session.participants:
+        weight = int(participant.priority or 0)
+        weights[participant.name] = weight if weight > 0 else 1
+        if participant.required:
+            required.add(participant.name)
+    return weights, required
+
+
 def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
     # Diversifica: un solo bloque (el mejor) por (semana, dia). Asi la misma
     # persona en dias/semanas distintos no genera opciones redundantes, y dos
     # semanas no colisionan. Ante empate de score se conserva el mas temprano.
+    #
+    # Requeridos: si existe al menos una celda que los cubre a todos, SOLO se
+    # recomiendan celdas con required_met True. Si ninguna los cubre (fallback),
+    # se mantienen las mejores celdas con required_met False para que la
+    # respuesta pueda avisar claramente quien queda fuera.
+    scorable = [cell for cell in matrix if cell.score > 0]
+    if not scorable:
+        return []
+    # Requeridos: si existe al menos una celda que los cubre a todos, SOLO se
+    # recomiendan celdas con required_met True. Si ninguna los cubre (fallback),
+    # se mantienen las mejores celdas con required_met False para que la
+    # respuesta pueda avisar claramente quien queda fuera.
+    if any(cell.required_met for cell in scorable):
+        pool = [cell for cell in scorable if cell.required_met]
+    else:
+        pool = scorable
+
     best_by_slot: dict[tuple[int, str], AvailabilityCell] = {}
-    for cell in matrix:
+    for cell in pool:
         if cell.score == 0:
             continue
         key = (cell.week_offset, cell.day)
         best = best_by_slot.get(key)
-        if best is None or cell.score > best.score:
+        if best is None or (cell.weighted_score, cell.score) > (best.weighted_score, best.score):
             best_by_slot[key] = cell
 
     options = [
@@ -38,15 +67,21 @@ def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
                 cell.available_participants,
                 cell.unavailable_participants,
                 cell.coverage_percent,
+                required_missing=cell.required_missing,
+                required_met=cell.required_met,
             ),
+            weighted_score=cell.weighted_score,
+            required_met=cell.required_met,
+            required_missing=list(cell.required_missing),
         )
         for cell in best_by_slot.values()
     ]
 
-    # Mejor cobertura primero; ante empate, semana mas cercana, dia y hora.
+    # Mejor ponderado primero (con pesos = 1 es identico al score anterior);
+    # ante empate, semana mas cercana, dia y hora.
     return sorted(
         options,
-        key=lambda option: (-option.score, option.week_offset, WEEKDAYS.index(option.day), option.start),
+        key=lambda option: (-option.weighted_score, option.week_offset, WEEKDAYS.index(option.day), option.start),
     )[:3]
 
 
@@ -58,6 +93,7 @@ def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
         len(session.channel_config.group_participant_ids),
         1,
     )
+    weights, required_names = _requirement_profile(session)
     workday_start = session.channel_config.workday_start_hour
     workday_end = session.channel_config.workday_end_hour
     scores: dict[tuple[int, str, str, str], set[str]] = {}
@@ -89,6 +125,8 @@ def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
                 available = sorted(names)
                 unavailable = sorted(name for name in participant_names if name not in names)
                 coverage_percent = round((len(available) / expected_participants) * 100)
+                required_available = sorted(required_names & names)
+                required_missing = sorted(required_names - names)
                 matrix.append(
                     AvailabilityCell(
                         day=day,  # type: ignore[arg-type]
@@ -99,6 +137,9 @@ def build_availability_matrix(session: Session) -> list[AvailabilityCell]:
                         unavailable_participants=unavailable,
                         score=len(available),
                         coverage_percent=coverage_percent,
+                        weighted_score=sum(weights.get(name, 1) for name in available),
+                        required_met=not required_missing,
+                        required_missing=required_missing,
                     )
                 )
 
@@ -112,7 +153,10 @@ def find_missing_info(session: Session) -> list[str]:
 
     for participant in session.participants:
         if not participant.availability:
-            missing.append(f"Falta disponibilidad de {participant.name}.")
+            if participant.required:
+                missing.append(f"Falta disponibilidad de {participant.name} (participante requerido).")
+            else:
+                missing.append(f"Falta disponibilidad de {participant.name}.")
 
     expected_participants = max(
         session.channel_config.group_participant_count or 0,
@@ -135,6 +179,13 @@ def build_insights(session: Session) -> list[str]:
 
     insights.append(f"Se detectaron {len(session.participants)} participante(s).")
 
+    required_names = [participant.name for participant in session.participants if participant.required]
+    prioritized_names = [participant.name for participant in session.participants if priority_of(participant)]
+    if required_names:
+        insights.append(f"Participantes requeridos: {', '.join(required_names)}.")
+    if prioritized_names:
+        insights.append(f"Con prioridad ponderada: {', '.join(prioritized_names)}.")
+
     if session.missing_info:
         insights.append(f"Hay {len(session.missing_info)} dato(s) faltante(s) antes de una decision ideal.")
 
@@ -143,6 +194,11 @@ def build_insights(session: Session) -> list[str]:
         insights.append(
             f"La mejor opcion actual cubre {best.coverage_percent}% del grupo: {best.day} {best.start}-{best.end}."
         )
+        if required_names:
+            if best.required_met:
+                insights.append("La mejor opcion incluye a todos los requeridos.")
+            else:
+                insights.append(f"La mejor opcion NO incluye a: {', '.join(best.required_missing)}.")
         if best.unavailable_participants:
             insights.append(f"Quedan fuera en la mejor opcion: {', '.join(best.unavailable_participants)}.")
         else:
@@ -151,20 +207,35 @@ def build_insights(session: Session) -> list[str]:
     return insights
 
 
-def build_explanation(available: list[str], unavailable: list[str], coverage_percent: int) -> str:
-    if not unavailable and coverage_percent == 100:
-        return f"Todos los participantes pueden asistir. Cobertura {coverage_percent}%."
+def priority_of(participant: Participant) -> int:
+    return max(int(participant.priority or 0), 0)
 
-    if not unavailable:
-        return (
+
+def build_explanation(
+    available: list[str],
+    unavailable: list[str],
+    coverage_percent: int,
+    *,
+    required_missing: list[str] | None = None,
+    required_met: bool | None = None,
+) -> str:
+    if not unavailable and coverage_percent == 100:
+        base = f"Todos los participantes pueden asistir. Cobertura {coverage_percent}%."
+    elif not unavailable:
+        base = (
             f"Asisten {len(available)} participante(s): {', '.join(available)}. "
             f"Quedan integrantes del grupo sin disponibilidad identificada. Cobertura {coverage_percent}%."
         )
-
-    return (
-        f"Asisten {len(available)} participante(s): {', '.join(available)}. "
-        f"No calzan: {', '.join(unavailable)}. Cobertura {coverage_percent}%."
-    )
+    else:
+        base = (
+            f"Asisten {len(available)} participante(s): {', '.join(available)}. "
+            f"No calzan: {', '.join(unavailable)}. Cobertura {coverage_percent}%."
+        )
+    if required_missing:
+        base += f" Faltan requeridos: {', '.join(required_missing)}."
+    elif required_met is True:
+        base += " Incluye a todos los requeridos."
+    return base
 
 
 def split_into_hour_blocks(slot: TimeSlot) -> list[TimeSlot]:

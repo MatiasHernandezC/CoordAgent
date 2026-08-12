@@ -44,6 +44,11 @@ class Participant(BaseModel):
     # por similitud de nombres.
     external_ids: list[WhatsAppUserId] = Field(default_factory=list, max_length=16)
     availability: list[TimeSlot] = Field(default_factory=list)
+    # Miembro que SI o SI debe estar en la reunion: las opciones que no lo
+    # incluyan dejan de recomendarse (el motor las filtra).
+    required: bool = False
+    # Peso de prioridad para el score de opciones (ej. el jefe). 0 = peso 1.
+    priority: int = 0
 
 
 class AvailabilityRemoval(BaseModel):
@@ -64,6 +69,11 @@ class TimeOption(BaseModel):
     score: int
     coverage_percent: int = 0
     explanation: str = ""
+    # Prioridades de la sesion ya aplicadas: score ponderado por pesos,
+    # y si la opcion cubre a todos los participantes requeridos.
+    weighted_score: int = 0
+    required_met: bool = False
+    required_missing: list[str] = Field(default_factory=list)
 
 
 class ProcessingSummary(BaseModel):
@@ -76,6 +86,8 @@ class ProcessingSummary(BaseModel):
     cached: bool = False
     fallback_used: bool = False
     quality_flags: list[str] = Field(default_factory=list)
+    # La frase "a la hora de siempre" se resolvio con el horario habitual de la sesion.
+    habitual_used: bool = False
     # Structured RAG metadata (defaults keep old sessions / clients compatible).
     retrieval_used: bool = False
     retrieval_source: str | None = None
@@ -114,6 +126,9 @@ class AvailabilityCell(BaseModel):
     unavailable_participants: list[str] = Field(default_factory=list)
     score: int = 0
     coverage_percent: int = 0
+    weighted_score: int = 0
+    required_met: bool = False
+    required_missing: list[str] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):
@@ -207,6 +222,13 @@ class Session(BaseModel):
     decision_history: list[DecisionRecord] = Field(default_factory=list)
     archived_at: str | None = None
     status: SessionStatus = "draft"
+    # Horario "de siempre" del grupo calculado desde decision_history.
+    # Cuando un mensaje dice "a la hora de siempre" se resuelve a este slot.
+    habitual_slot: TimeSlot | None = None
+    # Indice en decision_history donde comienza la ronda actual (para que el
+    # horario habitual tras "reinicia historial" no arrastre decisiones de
+    # rondas anteriores, que solo se conservan para auditoria).
+    habitual_history_index: int | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -270,6 +292,13 @@ class ScheduleInterpretation(BaseModel):
 
 class AddParticipantRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+
+
+class ConfigureParticipantRequirementsRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    # Ambos opcionales: permite cambiar solo una dimensión sin tocar la otra.
+    required: bool | None = None
+    priority: int | None = Field(default=None, ge=0, le=10)
 
 
 class AddAvailabilityRequest(BaseModel):
