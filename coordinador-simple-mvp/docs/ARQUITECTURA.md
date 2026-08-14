@@ -359,6 +359,11 @@ Controles ya presentes:
 | PATCH | `/api/sessions/{id}/channel/config` | Configura canal, grupo y formato de respuesta. |
 | POST | `/api/sessions/{id}/channel/messages` | Ingesta un mensaje de WhatsApp/canal. |
 | POST | `/api/sessions/{id}/channel/batch` | Simula varios mensajes en una llamada. |
+| POST | `/api/channels/slack/events` | Events API de Slack (canal opcional). Sin Basic Auth; se autentica con firma HMAC de Slack. |
+| GET | `/api/admin/google-calendar/status` | Estado de la conexion OAuth (configurado/conectado/cuenta). |
+| GET | `/api/admin/google-calendar/auth-url` | URL de autorizacion de Google para conectar la cuenta admin. |
+| GET | `/api/admin/google-calendar/callback` | Redireccion OAuth de Google; guarda el refresh token cifrado. |
+| POST | `/api/admin/google-calendar/disconnect` | Olvida la credencial de Google Calendar guardada. |
 
 ## Decisiones De Arquitectura
 

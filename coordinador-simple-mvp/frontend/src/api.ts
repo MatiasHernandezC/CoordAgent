@@ -1,4 +1,4 @@
-import type { LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
+import type { GoogleCalendarStatus, LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "coordina.basicAuth";
@@ -143,6 +143,18 @@ export function deleteLlmKey(credentialId: string, confirmName: string) {
     method: "DELETE",
     body: JSON.stringify({ confirm_name: confirmName })
   });
+}
+
+export function getGoogleCalendarStatus() {
+  return request<GoogleCalendarStatus>("/api/admin/google-calendar/status", { method: "GET" });
+}
+
+export function getGoogleCalendarAuthUrl() {
+  return request<{ auth_url: string }>("/api/admin/google-calendar/auth-url", { method: "GET" });
+}
+
+export function disconnectGoogleCalendar() {
+  return request<{ disconnected: boolean }>("/api/admin/google-calendar/disconnect", { method: "POST" });
 }
 
 export function validateLogin(credentials: AuthCredentials) {

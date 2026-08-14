@@ -13,6 +13,12 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 
+	# Sin Basic Auth: Slack no puede mandar esas credenciales. Se valida con
+	# su firma HMAC (X-Slack-Signature) dentro del backend.
+	handle /api/channels/slack/events {
+		reverse_proxy backend:8000
+	}
+
 	# El backend monta sus rutas bajo /api y expone /health.
 	handle /api/* {
 		basic_auth {

@@ -131,6 +131,31 @@ class Settings:
         app_env == "production",
     )
 
+    # Canal Slack (opcional, ademas de WhatsApp). Sin bot token el canal queda
+    # desactivado: el endpoint responde 503 en vez de fallar silenciosamente.
+    slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN", "")
+    slack_signing_secret: str = os.getenv("SLACK_SIGNING_SECRET", "")
+    slack_trigger_word: str = os.getenv("SLACK_TRIGGER_WORD", "@coordina")
+    slack_request_max_age_seconds: int = env_int("SLACK_REQUEST_MAX_AGE_SECONDS", 300)
+
+    # Integracion opcional con Google Calendar: OAuth a nivel administrador
+    # (una sola cuenta conectada desde el panel), no por participante. Usa la
+    # misma llave maestra que las llaves Gemini para cifrar el refresh token.
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    google_oauth_redirect_uri: str = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "")
+    google_calendar_credential_file: Path = Path(
+        os.getenv("GOOGLE_CALENDAR_CREDENTIAL_FILE", "data/google_calendar_credential.json")
+    )
+
+    @property
+    def slack_configured(self) -> bool:
+        return bool(self.slack_bot_token and self.slack_signing_secret)
+
+    @property
+    def google_oauth_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret and self.google_oauth_redirect_uri)
+
     @property
     def cors_origins(self) -> list[str]:
         raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")

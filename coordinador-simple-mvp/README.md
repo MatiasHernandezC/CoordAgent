@@ -17,6 +17,8 @@ Estado actual del MVP:
 9. Panel con trazabilidad de procesamiento, historial de decisiones y reporte descargable.
 10. Cola persistente e idempotencia por ID de WhatsApp para reintentar sin duplicar decisiones.
 11. Healthchecks, rotacion de logs, respaldo cifrado y monitor systemd del droplet.
+12. Canal Slack opcional (ademas de WhatsApp), reutilizando el mismo pipeline de extraccion/decision. Ver [docs/DESPLIEGUE_SLACK.md](docs/DESPLIEGUE_SLACK.md).
+13. Integracion opcional con Google Calendar: al confirmar, crea el evento real en la cuenta conectada (ademas del link/.ics de siempre). Ver [docs/CONFIGURACION_GOOGLE_CALENDAR.md](docs/CONFIGURACION_GOOGLE_CALENDAR.md).
 
 ## Mejoras Operativas
 

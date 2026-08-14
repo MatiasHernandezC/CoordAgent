@@ -5,9 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.bff.routes import router
+from app.bff.slack_routes import router as slack_router
 from app.settings import settings
 from app.services.session_service import session_service
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("app")
 
 app = FastAPI(title="Coordinador Simple MVP", version="0.1.0")
@@ -48,3 +50,4 @@ def readiness():
 
 
 app.include_router(router, prefix="/api")
+app.include_router(slack_router, prefix="/api/channels/slack")

@@ -11,10 +11,13 @@ import {
   createLlmKey,
   createSession,
   deleteLlmKey,
+  disconnectGoogleCalendar,
   exportCalendar,
   exportSession,
   exportSessionCsv,
   getSavedAuth,
+  getGoogleCalendarAuthUrl,
+  getGoogleCalendarStatus,
   getOpsStatus,
   getRuntime,
   listLlmKeys,
@@ -32,8 +35,9 @@ import {
 } from "./api";
 import { CHANNEL_EXAMPLE } from "./constants";
 import { GeminiKeyPanel } from "./components/GeminiKeyPanel";
+import { GoogleCalendarPanel } from "./components/GoogleCalendarPanel";
 import { getErrorMessage } from "./format";
-import type { Day, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
+import type { Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
 const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
 const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
@@ -58,6 +62,7 @@ export function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [llmKeyState, setLlmKeyState] = useState<LlmKeyListResponse | null>(null);
+  const [googleCalendarState, setGoogleCalendarState] = useState<GoogleCalendarStatus | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -156,7 +161,7 @@ export function App() {
       .then((info) => {
         setRuntime(info);
         setAuthState("authenticated");
-        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()]).catch((err) =>
+        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]).catch((err) =>
           setError(getErrorMessage(err))
         );
       })
@@ -170,7 +175,7 @@ export function App() {
     if (authState !== "authenticated" || !autoRefresh) return;
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible" || busyRef.current) return;
-      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()])
+      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()])
         .then(() => setError(""))
         .catch((err) => setError(getErrorMessage(err)));
     }, AUTO_REFRESH_MS);
@@ -232,6 +237,11 @@ export function App() {
     setLlmKeyState(response);
   }
 
+  async function refreshGoogleCalendar() {
+    const response = await getGoogleCalendarStatus();
+    setGoogleCalendarState(response);
+  }
+
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     const credentials: AuthCredentials = {
@@ -244,7 +254,7 @@ export function App() {
       saveAuth(credentials);
       setRuntime(info);
       setAuthState("authenticated");
-      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys()]);
+      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
     });
   }
 
@@ -253,6 +263,7 @@ export function App() {
     setRuntime(null);
     setOpsStatus(null);
     setLlmKeyState(null);
+    setGoogleCalendarState(null);
     setSession(null);
     setSessions([]);
     setLoginPassword("");
@@ -261,7 +272,7 @@ export function App() {
 
   async function handleRefreshAll() {
     await runAction("Actualizando panel...", async () => {
-      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus(), refreshLlmKeys()]);
+      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
       setRuntime(info);
     });
   }
@@ -305,6 +316,20 @@ export function App() {
       deleted = true;
     });
     return deleted;
+  }
+
+  async function handleConnectGoogleCalendar() {
+    await runAction("Abriendo autorizacion de Google...", async () => {
+      const { auth_url } = await getGoogleCalendarAuthUrl();
+      window.open(auth_url, "_blank", "noopener");
+    });
+  }
+
+  async function handleDisconnectGoogleCalendar() {
+    await runAction("Desconectando Google Calendar...", async () => {
+      await disconnectGoogleCalendar();
+      await refreshGoogleCalendar();
+    });
   }
 
   async function handleRunDemo() {
@@ -931,6 +956,13 @@ export function App() {
             onUpdate={handleUpdateLlmKey}
             onTest={handleTestLlmKey}
             onDelete={handleDeleteLlmKey}
+          />
+
+          <GoogleCalendarPanel
+            state={googleCalendarState}
+            busy={isBusy}
+            onConnect={handleConnectGoogleCalendar}
+            onDisconnect={handleDisconnectGoogleCalendar}
           />
 
           <section className="panel">

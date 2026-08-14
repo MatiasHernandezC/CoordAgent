@@ -103,6 +103,9 @@ class CalendarEventSnapshot(BaseModel):
     end_at: str
     timezone: str
     dtstamp: str
+    # Solo si el evento se creo realmente en Google Calendar (cuenta conectada).
+    google_event_id: str | None = None
+    google_event_html_link: str | None = None
 
 
 class DecisionRecord(BaseModel):
@@ -471,3 +474,14 @@ class DeleteLlmKeyRequest(BaseModel):
 class ExportResponse(BaseModel):
     filename: str
     text: str
+
+
+class GoogleCalendarStatus(BaseModel):
+    configured: bool
+    connected: bool
+    account_email: str | None = None
+    connected_at: str | None = None
+
+
+class GoogleCalendarAuthUrl(BaseModel):
+    auth_url: str

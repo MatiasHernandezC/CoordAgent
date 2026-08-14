@@ -473,6 +473,19 @@ class SessionService:
             )
         return repository.save(session)
 
+    def attach_google_calendar_event(self, session_id: str, event_id: str, html_link: str) -> Session:
+        """Adjunta el evento real de Google Calendar a la decision confirmada."""
+        session = self.get(session_id)
+        if session.selected_calendar_event:
+            session.selected_calendar_event.google_event_id = event_id
+            session.selected_calendar_event.google_event_html_link = html_link
+        if session.decision_history:
+            last = session.decision_history[-1]
+            if last.calendar_event:
+                last.calendar_event.google_event_id = event_id
+                last.calendar_event.google_event_html_link = html_link
+        return repository.save(session)
+
     def cancel_decision(self, session_id: str, external_id: str | None = None) -> Session:
         session = self.get(session_id)
         if not session.selected_option and not session.decision_summary:
@@ -1455,10 +1468,18 @@ def build_confirmed_channel_reply(session: Session, now: datetime | None = None)
         elif option.required_missing:
             lines.append(f"⚠ No asistirian requeridos: {', '.join(option.required_missing)}.")
 
-    google_url = build_google_calendar_url(session, now)
+    real_event_link = (
+        session.selected_calendar_event.google_event_html_link
+        if session.selected_calendar_event
+        else None
+    )
+    google_url = real_event_link or build_google_calendar_url(session, now)
     if google_url:
         lines.append("")
-        lines.append("Agregar a tu calendario:")
+        if real_event_link:
+            lines.append("Evento creado en Google Calendar:")
+        else:
+            lines.append("Agregar a tu calendario:")
         lines.append(google_url)
         lines.append("_Tambien adjunto el evento (.ics) para Outlook/Apple._")
 

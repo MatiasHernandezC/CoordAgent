@@ -4,6 +4,7 @@ pydantic==2.10.4
 python-dotenv==1.0.1
 pytest==8.3.4
 httpx==0.28.1
+requests==2.32.3
 sqlalchemy==2.0.51
 psycopg2-binary==2.9.12
 pillow==11.0.0

@@ -21,10 +21,22 @@ services:
       APP_ENV: production
       DB_BACKEND: postgres
       DATABASE_URL: postgresql://postgres:postgres@db:5432/meetingdb
-      # mock = sin dependencias externas. Cambia a gemini + GEMINI_API_KEY para IA real.
-      LLM_PROVIDER: mock
+      # mock = sin dependencias externas. Corre con --env-file backend/.env para
+      # traer LLM_PROVIDER=gemini y el resto de las llaves desde ahi.
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_FALLBACK_ENABLED: "true"
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_KEYS_MASTER_KEY: ${LLM_KEYS_MASTER_KEY:-}
+      # Sin Caddy en dev no hay header X-Coordina-Admin: sin esto el panel
+      # (llaves Gemini, Google Calendar) devuelve 401.
+      ADMIN_PROXY_HEADER_REQUIRED: ${ADMIN_PROXY_HEADER_REQUIRED:-false}
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      SLACK_TRIGGER_WORD: ${SLACK_TRIGGER_WORD:-@coordina}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
     ports:
       - "8000:8000"
     depends_on:

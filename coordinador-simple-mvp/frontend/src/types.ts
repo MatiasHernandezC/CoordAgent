@@ -139,6 +139,15 @@ export type CalendarEventSnapshot = {
   end_at: string;
   timezone: string;
   dtstamp: string;
+  google_event_id?: string | null;
+  google_event_html_link?: string | null;
+};
+
+export type GoogleCalendarStatus = {
+  configured: boolean;
+  connected: boolean;
+  account_email: string | null;
+  connected_at: string | null;
 };
 
 export type Session = {

@@ -1,7 +1,9 @@
 import base64
+import logging
 from time import perf_counter
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from app.schemas import (
     AddAvailabilityRequest,
@@ -16,6 +18,8 @@ from app.schemas import (
     CreateLlmKeyRequest,
     DeleteLlmKeyRequest,
     ExportResponse,
+    GoogleCalendarAuthUrl,
+    GoogleCalendarStatus,
     LlmKeyListResponse,
     MessageRequest,
     MessageResponse,
@@ -26,6 +30,11 @@ from app.schemas import (
 )
 from app.settings import settings
 from app.services.calendar_export import build_calendar_ics
+from app.services.google_calendar_service import (
+    GoogleCalendarApiError,
+    GoogleCalendarConfigError,
+    google_calendar_service,
+)
 from app.services.image_render import render_availability_base64
 from app.services.group_memory import build_group_memory_context
 from app.services.habitual_time import detect_habitual_phrase
@@ -55,6 +64,7 @@ from app.services.session_service import (
 )
 
 router = APIRouter()
+logger = logging.getLogger("app.routes")
 
 
 @router.get("/runtime", response_model=RuntimeInfo)
@@ -137,6 +147,51 @@ def delete_llm_key(credential_id: str, payload: DeleteLlmKeyRequest, request: Re
     actor = require_admin_actor(request)
     llm_key_service.delete(credential_id, payload.confirm_name, actor)
     return {"deleted": True}
+
+
+@router.get("/admin/google-calendar/status", response_model=GoogleCalendarStatus)
+def google_calendar_status(request: Request):
+    require_admin_actor(request)
+    return GoogleCalendarStatus.model_validate(google_calendar_service.status())
+
+
+@router.get("/admin/google-calendar/auth-url", response_model=GoogleCalendarAuthUrl)
+def google_calendar_auth_url(request: Request):
+    require_admin_actor(request)
+    try:
+        return GoogleCalendarAuthUrl(auth_url=google_calendar_service.authorization_url())
+    except GoogleCalendarConfigError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@router.post("/admin/google-calendar/disconnect")
+def google_calendar_disconnect(request: Request):
+    require_admin_actor(request)
+    google_calendar_service.disconnect()
+    return {"disconnected": True}
+
+
+@router.get("/admin/google-calendar/callback", response_class=HTMLResponse)
+def google_calendar_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    # Llega como redireccion del navegador, sin el header admin: se protege
+    # con el "state" de un solo uso de /auth-url.
+    if error:
+        return _google_calendar_result_page(False, f"Google rechazo la autorizacion: {error}")
+    try:
+        google_calendar_service.handle_callback(code, state)
+    except (GoogleCalendarConfigError, GoogleCalendarApiError) as error:
+        return _google_calendar_result_page(False, str(error))
+    return _google_calendar_result_page(True, "Cuenta de Google Calendar conectada correctamente.")
+
+
+def _google_calendar_result_page(ok: bool, message: str) -> HTMLResponse:
+    title = "Conectado" if ok else "No se pudo conectar"
+    return HTMLResponse(
+        f"<html><body style='font-family:sans-serif;padding:2rem'>"
+        f"<h2>{title}</h2><p>{message}</p>"
+        f"<p>Puedes cerrar esta pestana y volver al panel de Coordina.</p>"
+        f"</body></html>"
+    )
 
 
 @router.post("/sessions")
@@ -246,14 +301,14 @@ def calculate(session_id: str):
 @router.post("/sessions/{session_id}/confirm")
 def confirm(session_id: str, payload: ConfirmRequest):
     with session_service.session_lock(session_id):
-        return {
-            "session": session_service.confirm(
-                session_id,
-                payload.option_id,
-                source="panel",
-                expected_proposal_revision=payload.expected_proposal_revision,
-            )
-        }
+        session = session_service.confirm(
+            session_id,
+            payload.option_id,
+            source="panel",
+            expected_proposal_revision=payload.expected_proposal_revision,
+        )
+        session = maybe_attach_google_calendar_event(session_id, session)
+        return {"session": session}
 
 
 @router.post("/sessions/{session_id}/cancel-decision")
@@ -637,6 +692,7 @@ def invoke_channel_command_if_needed(
             except HTTPException as error:
                 reply = f"*Coordina*\n\nNo puedo confirmar todavia. {error.detail}"
             else:
+                session = maybe_attach_google_calendar_event(session_id, session)
                 reply = build_confirmed_channel_reply(session)
                 # Adjunta el evento .ics solo si la confirmacion realmente se
                 # completo. Es opcional: si falla, el texto sigue saliendo.
@@ -924,6 +980,24 @@ def replay_command_receipt(
         agent_reply_document_mimetype=document_mimetype,
         elapsed_ms=elapsed_ms(started),
         duplicate=True,
+    )
+
+
+def maybe_attach_google_calendar_event(session_id: str, session):
+    """Crea el evento real si hay cuenta conectada; si falla, sigue el link/.ics de siempre."""
+    if not google_calendar_service.is_connected():
+        return session
+    try:
+        event = google_calendar_service.create_event(session)
+    except GoogleCalendarApiError as error:
+        logger.warning("google_calendar_create_event_failed session=%s error=%s", session_id, error)
+        return session
+    if not event or not event.get("id"):
+        return session
+    return session_service.attach_google_calendar_event(
+        session_id,
+        event["id"],
+        event.get("htmlLink") or "",
     )
 
 
