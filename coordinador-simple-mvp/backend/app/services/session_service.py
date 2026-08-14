@@ -100,10 +100,11 @@ class SessionService:
         group_participant_ids: list[str],
         coordinator_ids: list[str],
         trigger_word: str,
+        channel_label: str = "WhatsApp",
     ) -> Session:
         """Create-or-get atomico por JID; un retry nunca crea otra sesion."""
         clean_jid = group_jid.strip()
-        clean_name = group_name.strip() or "grupo de WhatsApp"
+        clean_name = group_name.strip() or f"grupo de {channel_label}"
         existing = next(
             (
                 session
@@ -128,7 +129,7 @@ class SessionService:
                     current.channel_config.group_participant_count = group_participant_count
                     current.channel_config.group_participant_ids = unique_ids(group_participant_ids)
                     current.channel_config.coordinator_ids = unique_ids(coordinator_ids)
-                    current.title = f"WhatsApp - {clean_name}"
+                    current.title = f"{channel_label} - {clean_name}"
                     if previous_roster != (
                         current.channel_config.group_participant_count,
                         tuple(current.channel_config.group_participant_ids),
@@ -137,7 +138,7 @@ class SessionService:
                     return repository.save(current)
 
         session = Session(
-            title=f"WhatsApp - {clean_name}",
+            title=f"{channel_label} - {clean_name}",
             channel_config=ChannelConfig(
                 listening_enabled=True,
                 trigger_word=trigger_word.strip(),
@@ -152,7 +153,7 @@ class SessionService:
                     role="system",
                     content=(
                         f"Sesion creada para {clean_name}. "
-                        f"Canal WhatsApp vinculado con invocacion {trigger_word.strip()}."
+                        f"Canal {channel_label} vinculado con invocacion {trigger_word.strip()}."
                     ),
                 )
             ],
@@ -563,10 +564,12 @@ class SessionService:
         if group_name is not None:
             cleaned_group_name = group_name.strip()
             session.channel_config.group_name = cleaned_group_name or None
+            known_prefixes = ("WhatsApp - ", "Slack - ")
             if cleaned_group_name and (
-                session.title.startswith("WhatsApp - ") or session.title == "Coordinacion WhatsApp"
+                session.title.startswith(known_prefixes) or session.title == "Coordinacion WhatsApp"
             ):
-                session.title = f"WhatsApp - {cleaned_group_name}"
+                prefix = next((p for p in known_prefixes if session.title.startswith(p)), known_prefixes[0])
+                session.title = f"{prefix}{cleaned_group_name}"
         if group_participant_count is not None:
             session.channel_config.group_participant_count = group_participant_count
         if group_participant_ids is not None:
@@ -894,7 +897,7 @@ def build_processing_summary(
     elif "third_party_requires_mention" in quality_flags:
         confidence = "low"
         label = "Baja"
-        detail = "Se descartó disponibilidad atribuida a otra persona porque no tenía una mención real de WhatsApp."
+        detail = "Se descartó disponibilidad atribuida a otra persona porque no tenía una mención real."
     elif "no_new_availability" in source_value:
         confidence = "low"
         label = "Baja"
@@ -1245,7 +1248,7 @@ def confirmation_blockers(session: Session) -> list[str]:
     if "ambiguous_mentioned_identity" in identity_flags:
         blockers.append("Hay una mención ambigua; reenvíenla mencionando a una sola persona por mensaje.")
     elif "third_party_requires_mention" in identity_flags:
-        blockers.append("Hay horarios de terceros descartados; reenvíenlos usando una mención real de WhatsApp.")
+        blockers.append("Hay horarios de terceros descartados; reenvíenlos usando una mención real, no como texto suelto.")
     # Una invocacion de comando sin disponibilidad nueva se registra con
     # confianza baja porque no hubo nada que interpretar. Eso no invalida una
     # propuesta ya calculada: bloquear aqui hacia que ``@coordina confirmar``
@@ -1440,7 +1443,7 @@ def build_identity_warning(session: Session) -> str:
     if "third_party_requires_mention" in flags:
         return (
             "*No incorporé horarios escritos a nombre de otra persona sin una mención real.* "
-            "Reenvíenlos seleccionando el contacto en WhatsApp, por ejemplo: _@Gabo puede todo el día_."
+            "Reenvíenlos mencionando de verdad a esa persona (no como texto), por ejemplo: _@Gabo puede todo el día_."
         )
     return ""
 
@@ -1502,7 +1505,7 @@ def build_help_reply(session: Session) -> str:
             "- _estoy libre mierc de 15:30 a 17:00_",
             "- _no me va bien martes de 10 a 12_",
             "- _hoy despues de las 4_",
-            "- Para informar por otra persona, selecciónenla en WhatsApp: _@Gabo puede todo el día_",
+            "- Para informar por otra persona, menciónenla de verdad (no como texto): _@Gabo puede todo el día_",
             "- Mencionen solo a una persona por mensaje.",
             "",
             "*Comandos*",

@@ -105,6 +105,7 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
                 [],
                 [],
                 settings.slack_trigger_word,
+                channel_label="Slack",
             )
 
         sender = resolve_display_name(user_id)
