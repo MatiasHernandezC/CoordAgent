@@ -53,6 +53,7 @@ from app.services.session_service import (
     build_no_habitual_reply,
     classify_channel_command,
     confirmation_blockers,
+    find_option,
     find_participant,
     last_invoking_message,
     last_invoking_sender,
@@ -68,7 +69,8 @@ logger = logging.getLogger("app.routes")
 
 
 @router.get("/runtime", response_model=RuntimeInfo)
-def runtime_info():
+def runtime_info(request: Request):
+    actor = require_admin_actor(request)
     model_by_provider = {
         "local": settings.local_llm_model,
         "gemini": settings.gemini_model,
@@ -96,6 +98,8 @@ def runtime_info():
         gemini_active_key_name=active_key["name"] if active_key else None,
         gemini_key_management_enabled=key_state["management_enabled"],
         warnings=warnings,
+        actor=actor,
+        is_superadmin=is_superadmin_actor(actor),
     )
 
 
@@ -215,13 +219,16 @@ def resolve_channel_group(payload: ResolveChannelGroupRequest):
 
 
 @router.get("/sessions")
-def list_sessions():
-    return {"sessions": session_service.list_sessions()}
+def list_sessions(request: Request):
+    actor = require_admin_actor(request)
+    return {"sessions": session_service.list_sessions(actor, is_superadmin_actor(actor))}
 
 
 @router.get("/sessions/{session_id}")
-def get_session(session_id: str):
-    return {"session": session_service.get(session_id)}
+def get_session(session_id: str, request: Request):
+    session = session_service.get(session_id)
+    require_group_access(request, session)
+    return {"session": session}
 
 
 @router.post("/sessions/{session_id}/message", response_model=MessageResponse)
@@ -299,8 +306,9 @@ def calculate(session_id: str):
 
 
 @router.post("/sessions/{session_id}/confirm")
-def confirm(session_id: str, payload: ConfirmRequest):
+def confirm(session_id: str, payload: ConfirmRequest, request: Request):
     with session_service.session_lock(session_id):
+        require_group_access(request, session_service.get(session_id))
         session = session_service.confirm(
             session_id,
             payload.option_id,
@@ -318,14 +326,16 @@ def cancel_decision(session_id: str):
 
 
 @router.post("/sessions/{session_id}/archive")
-def archive_session(session_id: str):
+def archive_session(session_id: str, request: Request):
     with session_service.session_lock(session_id):
+        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.archive(session_id)}
 
 
 @router.post("/sessions/{session_id}/reopen")
-def reopen_session(session_id: str):
+def reopen_session(session_id: str, request: Request):
     with session_service.session_lock(session_id):
+        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.reopen(session_id)}
 
 
@@ -354,8 +364,10 @@ def export_calendar(session_id: str):
 
 
 @router.patch("/sessions/{session_id}/channel/config")
-def configure_channel(session_id: str, payload: ChannelConfigRequest):
+def configure_channel(session_id: str, payload: ChannelConfigRequest, request: Request):
     with session_service.session_lock(session_id):
+        current = session_service.get(session_id)
+        actor = require_group_access(request, current)
         session = session_service.configure_channel(
             session_id,
             payload.listening_enabled,
@@ -368,6 +380,9 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest):
             payload.group_participant_count,
             payload.group_participant_ids,
             payload.coordinator_ids,
+            payload.owner_admin,
+            actor,
+            is_superadmin_actor(actor),
         )
         return {"session": session}
 
@@ -551,6 +566,93 @@ def invoke_channel_if_needed(
     )
 
 
+def execute_confirm_command(
+    session_id: str,
+    session,
+    *,
+    option_index: int | None = None,
+    option_id: str | None = None,
+    option_label: str | int | None = None,
+    confirmed_by: str,
+    source: str,
+    external_id: str | None,
+    expected_revision: int | None,
+) -> tuple:
+    """Recalcula, valida blockers/revision, resuelve la opcion (por indice de
+    texto o por id de boton), confirma y arma la respuesta + adjunto .ics.
+    Devuelve (session, reply_text, document_b64, document_name, document_mimetype).
+    Usado tanto por el comando de texto "confirmar N" (WhatsApp/Slack) como
+    por el click de un boton de Slack (Block Kit)."""
+    session = session_service.calculate(session_id)
+    if expected_revision is None:
+        expected_revision = session.proposal_revision
+
+    blockers = confirmation_blockers(session)
+    if blockers:
+        reply = (
+            "*Coordina*\n\n"
+            "No puedo confirmar todavia:\n"
+            + "\n".join(f"- {item}" for item in blockers)
+            + "\n\n"
+            + build_channel_reply(session)
+        )
+        return session, reply, None, None, None
+
+    if expected_revision != session.proposal_revision:
+        reply = (
+            "*Coordina*\n\n"
+            f"La propuesta cambio: recibí R{expected_revision} y la actual es "
+            f"R{session.proposal_revision}. Estas son las opciones vigentes:\n\n"
+            + build_channel_reply(session)
+        )
+        return session, reply, None, None, None
+
+    option = None
+    if option_id is not None:
+        option = find_option(session.options, option_id)
+    elif option_index is not None and 1 <= option_index <= len(session.options):
+        option = session.options[option_index - 1]
+
+    if option is None:
+        label = option_label if option_label is not None else option_index
+        reply = (
+            "*Coordina*\n\n"
+            f"No encuentro la opcion {label}. Pide *@coordina* para ver las opciones actuales."
+        )
+        return session, reply, None, None, None
+
+    try:
+        session = session_service.confirm(
+            session_id,
+            option.id,
+            confirmed_by=confirmed_by,
+            source=source,
+            external_id=external_id,
+            expected_proposal_revision=expected_revision,
+        )
+    except HTTPException as error:
+        reply = f"*Coordina*\n\nNo puedo confirmar todavia. {error.detail}"
+        return session, reply, None, None, None
+
+    session = maybe_attach_google_calendar_event(session_id, session)
+    reply = build_confirmed_channel_reply(session)
+    # Adjunta el evento .ics solo si la confirmacion realmente se completo. Es
+    # opcional: si falla, el texto sigue saliendo.
+    document = document_name = document_mimetype = None
+    try:
+        ics_text = build_calendar_ics(session)
+        document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
+        safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
+        document_name = f"{safe_name}-evento.ics"
+        document_mimetype = "text/calendar"
+    except Exception:
+        document = None
+        document_name = None
+        document_mimetype = None
+
+    return session, reply, document, document_name, document_mimetype
+
+
 def invoke_channel_command_if_needed(
     session_id: str,
     session,
@@ -644,68 +746,23 @@ def invoke_channel_command_if_needed(
         reply = build_help_reply(session)
 
     elif command_name == "confirm":
-        # Recalcula siempre: si llego disponibilidad nueva junto al comando,
-        # las opciones deben reflejarla antes de cerrar la decision.
-        session = session_service.calculate(session_id)
-
-        option_index = command["option_index"]
         # El codigo Rn continua siendo aceptado para proteger confirmaciones
         # explicitas contra una propuesta antigua. Para el uso cotidiano no
         # obligamos a copiarlo: sin Rn se confirma la propuesta vigente que
         # acabamos de recalcular bajo el lock del grupo.
-        expected_revision = command.get("proposal_revision")
-        if expected_revision is None:
-            expected_revision = session.proposal_revision
-        blockers = confirmation_blockers(session)
-        if blockers:
-            reply = (
-                "*Coordina*\n\n"
-                "No puedo confirmar todavia:\n"
-                + "\n".join(f"- {item}" for item in blockers)
-                + "\n\n"
-                + build_channel_reply(session)
-            )
-        elif expected_revision is not None and expected_revision != session.proposal_revision:
-            reply = (
-                "*Coordina*\n\n"
-                f"La propuesta cambio: recibí R{expected_revision} y la actual es "
-                f"R{session.proposal_revision}. Estas son las opciones vigentes:\n\n"
-                + build_channel_reply(session)
-            )
-        elif option_index < 1 or option_index > len(session.options):
-            option_label = command.get("option_label", option_index)
-            reply = (
-                "*Coordina*\n\n"
-                f"No encuentro la opcion {option_label}. Pide *@coordina* para ver las opciones actuales."
-            )
-        else:
-            option = session.options[option_index - 1]
-            try:
-                session = session_service.confirm(
-                    session_id,
-                    option.id,
-                    confirmed_by=last_invoking_sender(session),
-                    source="whatsapp",
-                    external_id=external_id,
-                    expected_proposal_revision=expected_revision,
-                )
-            except HTTPException as error:
-                reply = f"*Coordina*\n\nNo puedo confirmar todavia. {error.detail}"
-            else:
-                session = maybe_attach_google_calendar_event(session_id, session)
-                reply = build_confirmed_channel_reply(session)
-                # Adjunta el evento .ics solo si la confirmacion realmente se
-                # completo. Es opcional: si falla, el texto sigue saliendo.
-                try:
-                    ics_text = build_calendar_ics(session)
-                    document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
-                    safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
-                    document_name = f"{safe_name}-evento.ics"
-                    document_mimetype = "text/calendar"
-                except Exception:
-                    document = None
-                    document_name = None
-                    document_mimetype = None
+        # group_jid con prefijo "slack:" identifica una sesion de Slack (ver
+        # slack_channel.channel_group_jid); el resto son grupos de WhatsApp.
+        command_source = "slack" if (session.channel_config.group_jid or "").startswith("slack:") else "whatsapp"
+        session, reply, document, document_name, document_mimetype = execute_confirm_command(
+            session_id,
+            session,
+            option_index=command["option_index"],
+            option_label=command.get("option_label"),
+            confirmed_by=last_invoking_sender(session),
+            source=command_source,
+            external_id=external_id,
+            expected_revision=command.get("proposal_revision"),
+        )
 
     elif command_name == "cancel":
         try:
@@ -1021,6 +1078,22 @@ def require_admin_actor(request: Request) -> str:
             detail="Esta operacion requiere autenticacion administrativa.",
         )
     return actor or "local-admin"
+
+
+def is_superadmin_actor(actor: str) -> bool:
+    return actor in settings.superadmin_users
+
+
+def require_group_access(request: Request, session) -> str:
+    """Extiende require_admin_actor: ademas de identificar al admin, exige
+    que sea el owner_admin del grupo (o superadmin) cuando el grupo ya tiene
+    un dueno asignado. Sesiones sin owner_admin quedan abiertas a cualquier
+    admin autenticado (todavia no reclamadas por nadie)."""
+    actor = require_admin_actor(request)
+    owner = session.channel_config.owner_admin
+    if owner and actor not in settings.superadmin_users and actor != owner:
+        raise HTTPException(status_code=403, detail="No tienes acceso a este grupo.")
+    return actor
 
 
 def elapsed_ms(started: float) -> int:

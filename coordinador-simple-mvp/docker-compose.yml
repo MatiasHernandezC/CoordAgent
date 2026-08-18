@@ -30,7 +30,10 @@ services:
       # Sin Caddy en dev no hay header X-Coordina-Admin: sin esto el panel
       # (llaves Gemini, Google Calendar) devuelve 401.
       ADMIN_PROXY_HEADER_REQUIRED: ${ADMIN_PROXY_HEADER_REQUIRED:-false}
-      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      # Solo aplica cuando se entra via el Caddy de prueba (ver servicio
+      # "caddy" y Caddyfile.dev): "coordina" ve/administra todos los grupos.
+      SUPERADMIN_USERS: coordina
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       SLACK_TRIGGER_WORD: ${SLACK_TRIGGER_WORD:-@coordina}
@@ -53,6 +56,35 @@ services:
       - "5173:80"
     depends_on:
       - backend
+
+  # --- Solo para probar localmente la administracion por grupos (owner_admin) ---
+  # No se usa en produccion. El flujo normal de dev (:5173 sin Basic Auth) sigue
+  # igual; esto agrega ademas http://localhost:8080 con Basic Auth real, para
+  # loguearse como distintos admins y ver el filtrado por grupo funcionando.
+  frontend-caddy-test:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2
+    environment:
+      # coordina/coordina123 -> superadmin (ve todos los grupos).
+      BASIC_AUTH_USER: coordina
+      BASIC_AUTH_HASH: '$$2a$$14$$XgJxlDvUL/dJ1pPjxqLaF.qUSt/wjy14otlT4k/vtVScqViff3N2e'
+      # finanzas/finanzas123 -> admin de area (solo sus grupos reclamados).
+      BASIC_AUTH_USER_2: finanzas
+      BASIC_AUTH_HASH_2: '$$2a$$14$$Qsi5Jc22OT0IWzt/e1I0duyLgePrifCWiPlT.Gzmo/xocIYw6YAvy'
+    ports:
+      - "8080:80"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend-caddy-test
 
 volumes:
   pgdata:

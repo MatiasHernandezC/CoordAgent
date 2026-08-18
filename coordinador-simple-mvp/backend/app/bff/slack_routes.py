@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
 from time import perf_counter
@@ -10,8 +11,9 @@ from time import perf_counter
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from app.bff.routes import invoke_channel_if_needed
+from app.bff.routes import execute_confirm_command, invoke_channel_if_needed
 from app.services.session_service import session_service
+from app.services.slack_blocks import build_confirm_option_blocks
 from app.services.slack_channel import (
     SlackApiError,
     SlackConfigError,
@@ -20,6 +22,7 @@ from app.services.slack_channel import (
     resolve_bot_user_id,
     resolve_channel_name,
     resolve_display_name,
+    respond_to_url,
     upload_file,
     verify_slack_signature,
 )
@@ -63,6 +66,37 @@ async def slack_events(request: Request):
     event = payload.get("event") or {}
     bot_user_id = _extract_bot_user_id(payload)
     await run_in_threadpool(_handle_event, event, bot_user_id)
+    return {"ok": True}
+
+
+@router.post("/interactions")
+async def slack_interactions(request: Request):
+    """Click en un boton de Block Kit (confirmar opcion). Slack manda esto
+    como application/x-www-form-urlencoded con un campo 'payload' (JSON
+    codificado), no como JSON crudo como /events."""
+    if not settings.slack_configured:
+        raise HTTPException(status_code=503, detail="Canal Slack no configurado.")
+
+    body = await request.body()  # bytes crudos para la firma, ANTES de leer el form
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    try:
+        valid = verify_slack_signature(timestamp=timestamp, body=body, signature=signature)
+    except SlackConfigError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    if not valid:
+        raise HTTPException(status_code=401, detail="Firma de Slack invalida.")
+
+    form = await request.form()
+    try:
+        payload = json.loads(form["payload"])
+    except (KeyError, ValueError):
+        return {"ok": True}
+
+    if payload.get("type") != "block_actions":
+        return {"ok": True}
+
+    await run_in_threadpool(_handle_block_action, payload)
     return {"ok": True}
 
 
@@ -141,7 +175,8 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
 def _deliver(channel_id: str, result) -> None:
     try:
         if result.agent_reply:
-            post_message(channel_id, result.agent_reply)
+            blocks = build_confirm_option_blocks(result.session)
+            post_message(channel_id, result.agent_reply, blocks)
         if result.agent_reply_image:
             upload_file(
                 channel_id,
@@ -157,3 +192,44 @@ def _deliver(channel_id: str, result) -> None:
             )
     except SlackApiError as error:
         logger.error("slack_delivery_failed channel=%s error=%s", channel_id, error)
+
+
+def _handle_block_action(payload: dict) -> None:
+    actions = payload.get("actions") or []
+    if not actions:
+        return
+    response_url = payload.get("response_url")
+    channel_id = (payload.get("channel") or {}).get("id", "")
+    user_id = (payload.get("user") or {}).get("id", "")
+
+    try:
+        value = json.loads(actions[0].get("value") or "{}")
+        session_id = value["sid"]
+        option_id = value["oid"]
+        expected_revision = value.get("rev")
+    except (ValueError, KeyError):
+        logger.warning("slack_block_action_bad_value payload=%r", actions[0] if actions else None)
+        return
+
+    try:
+        session = session_service.get(session_id)
+        sender = resolve_display_name(user_id)
+        with session_service.session_lock(session_id):
+            _session, reply, document, document_name, document_mimetype = execute_confirm_command(
+                session_id,
+                session,
+                option_id=option_id,
+                confirmed_by=sender,
+                source="slack",
+                external_id=actions[0].get("action_ts"),
+                expected_revision=expected_revision,
+            )
+        logger.info("slack_block_action_confirm session=%s option=%s", session_id, option_id)
+        if response_url:
+            respond_to_url(response_url, reply)
+        elif channel_id and reply:
+            post_message(channel_id, reply)
+        if document and document_name and channel_id:
+            upload_file(channel_id, document_name, base64.b64decode(document))
+    except Exception:  # nunca debe tumbar el handler del webhook
+        logger.exception("slack_block_action_failed session=%s channel=%s", session_id, channel_id)

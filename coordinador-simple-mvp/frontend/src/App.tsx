@@ -60,6 +60,7 @@ export function App() {
   const [loginUser, setLoginUser] = useState("coordina");
   const [loginPassword, setLoginPassword] = useState("");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const isSuperadmin = runtime?.is_superadmin ?? false;
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [llmKeyState, setLlmKeyState] = useState<LlmKeyListResponse | null>(null);
   const [googleCalendarState, setGoogleCalendarState] = useState<GoogleCalendarStatus | null>(null);
@@ -393,6 +394,24 @@ export function App() {
     });
   }
 
+  async function handleClaimOwner() {
+    if (!session) return;
+    await runAction("Actualizando dueno del grupo...", async () => {
+      const response = await configureChannel(session.id, { owner_admin: loginUser.trim() });
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+    });
+  }
+
+  async function handleReleaseOwner() {
+    if (!session) return;
+    await runAction("Liberando grupo...", async () => {
+      const response = await configureChannel(session.id, { owner_admin: "" });
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+    });
+  }
+
   async function handleSaveChannelConfig(event: FormEvent) {
     event.preventDefault();
     if (!session || session.archived_at) return;
@@ -590,13 +609,17 @@ export function App() {
         <Metric label="Abiertas" value={String(openSessionCount)} detail={`${archivedSessionCount} archivadas`} tone="ok" />
         <Metric label="Revision" value={String(reviewSessionCount)} detail={`${readySessionCount} listas`} tone={reviewSessionCount ? "warn" : "ok"} />
         <Metric label="Mensajes" value={String(latestMessageCount)} detail="sesion activa" tone="neutral" />
-        <Metric
-          label="Backend"
-          value={runtime?.provider_label ?? "Revisando"}
-          detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_active_key_name ? `Activa: ${runtime.gemini_active_key_name}` : "Sin Gemini"}
-          tone={runtime?.warnings.length || (lastProcessing && lastProcessing.confidence !== "high") ? "warn" : "ok"}
-        />
-        <Metric label="Seguridad" value="HTTPS" detail="API protegida" tone="ok" />
+        {isSuperadmin ? (
+          <>
+            <Metric
+              label="Backend"
+              value={runtime?.provider_label ?? "Revisando"}
+              detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_active_key_name ? `Activa: ${runtime.gemini_active_key_name}` : "Sin Gemini"}
+              tone={runtime?.warnings.length || (lastProcessing && lastProcessing.confidence !== "high") ? "warn" : "ok"}
+            />
+            <Metric label="Seguridad" value="HTTPS" detail="API protegida" tone="ok" />
+          </>
+        ) : null}
       </section>
 
       <section className="workspace">
@@ -639,9 +662,11 @@ export function App() {
             <FilterButton active={sessionFilter === "groups"} onClick={() => setSessionFilter("groups")}>
               Grupos <span>{realGroupCount}</span>
             </FilterButton>
-            <FilterButton active={sessionFilter === "manual"} onClick={() => setSessionFilter("manual")}>
-              Pruebas <span>{manualSessionCount}</span>
-            </FilterButton>
+            {isSuperadmin ? (
+              <FilterButton active={sessionFilter === "manual"} onClick={() => setSessionFilter("manual")}>
+                Pruebas <span>{manualSessionCount}</span>
+              </FilterButton>
+            ) : null}
           </div>
 
           <div className="session-list" aria-label="Sesiones disponibles">
@@ -667,6 +692,15 @@ export function App() {
                 </div>
                 <div className="detail-actions">
                   <div className={`status-badge ${session.status}`}>{getSessionQuality(session).label}</div>
+                  {session.channel_config.owner_admin ? (
+                    <button className="ghost-button compact" type="button" onClick={handleReleaseOwner} disabled={isBusy}>
+                      Liberar grupo
+                    </button>
+                  ) : (
+                    <button className="ghost-button compact" type="button" onClick={handleClaimOwner} disabled={isBusy}>
+                      Reclamar grupo
+                    </button>
+                  )}
                   <button className="ghost-button compact" type="button" onClick={handleToggleArchive} disabled={isBusy}>
                     {session.archived_at ? "Reabrir" : "Archivar"}
                   </button>
@@ -675,6 +709,7 @@ export function App() {
 
               <div className="facts-grid">
                 <Fact label="Calidad" value={getSessionQuality(session).label} />
+                <Fact label="Dueno" value={session.channel_config.owner_admin ?? "Sin asignar"} />
                 <Fact label="Integrantes actuales" value={String(session.channel_config.group_participant_count ?? "N/D")} />
                 <Fact label="Con disponibilidad" value={String(session.participants.length)} />
                 <Fact label="Revision vigente" value={`R${session.proposal_revision}`} />
@@ -949,21 +984,25 @@ export function App() {
         </section>
 
         <aside className="side-stack">
-          <GeminiKeyPanel
-            state={llmKeyState}
-            busy={isBusy}
-            onCreate={handleCreateLlmKey}
-            onUpdate={handleUpdateLlmKey}
-            onTest={handleTestLlmKey}
-            onDelete={handleDeleteLlmKey}
-          />
+          {isSuperadmin ? (
+            <>
+              <GeminiKeyPanel
+                state={llmKeyState}
+                busy={isBusy}
+                onCreate={handleCreateLlmKey}
+                onUpdate={handleUpdateLlmKey}
+                onTest={handleTestLlmKey}
+                onDelete={handleDeleteLlmKey}
+              />
 
-          <GoogleCalendarPanel
-            state={googleCalendarState}
-            busy={isBusy}
-            onConnect={handleConnectGoogleCalendar}
-            onDisconnect={handleDisconnectGoogleCalendar}
-          />
+              <GoogleCalendarPanel
+                state={googleCalendarState}
+                busy={isBusy}
+                onConnect={handleConnectGoogleCalendar}
+                onDisconnect={handleDisconnectGoogleCalendar}
+              />
+            </>
+          ) : null}
 
           <section className="panel">
             <div className="panel-head">
@@ -1107,25 +1146,27 @@ export function App() {
             </div>
           </section>
 
-          <section className="panel">
-            <div className="panel-head">
-              <div>
-                <span>Prueba</span>
-                <strong>Canal simulado</strong>
-              </div>
-            </div>
-            <div className="mini-thread">
-              {CHANNEL_EXAMPLE.map((message) => (
-                <div className="mini-message" key={`${message.sender}-${message.text}`}>
-                  <span>{message.sender}</span>
-                  <p>{message.text}</p>
+          {isSuperadmin ? (
+            <section className="panel">
+              <div className="panel-head">
+                <div>
+                  <span>Prueba</span>
+                  <strong>Canal simulado</strong>
                 </div>
-              ))}
-            </div>
-            <button type="button" onClick={handleRunDemo} disabled={isBusy}>
-              Ejecutar prueba
-            </button>
-          </section>
+              </div>
+              <div className="mini-thread">
+                {CHANNEL_EXAMPLE.map((message) => (
+                  <div className="mini-message" key={`${message.sender}-${message.text}`}>
+                    <span>{message.sender}</span>
+                    <p>{message.text}</p>
+                  </div>
+                ))}
+              </div>
+              <button type="button" onClick={handleRunDemo} disabled={isBusy}>
+                Ejecutar prueba
+              </button>
+            </section>
+          ) : null}
         </aside>
       </section>
     </main>

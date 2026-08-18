@@ -85,12 +85,20 @@ class SessionService:
         )
         return repository.save(session)
 
-    def list_sessions(self) -> list[Session]:
+    def list_sessions(self, actor: str | None = None, is_superadmin: bool = False) -> list[Session]:
         sessions = repository.list_all()
         for session in sessions:
             if normalize_generated_contact_labels(session):
                 repository.save(session)
-        return sessions
+        if actor is None or is_superadmin:
+            return sessions
+        # Un admin de area ve las sesiones sin dueno (todavia no reclamadas)
+        # y las suyas propias; el resto queda fuera de la lista.
+        return [
+            session
+            for session in sessions
+            if not session.channel_config.owner_admin or session.channel_config.owner_admin == actor
+        ]
 
     def resolve_channel_group(
         self,
@@ -448,7 +456,7 @@ class SessionService:
                 option=option.model_copy(deep=True),
                 summary=session.decision_summary,
                 confirmed_by=confirmed_by.strip() or "admin",
-                source=source if source in {"panel", "whatsapp", "api"} else "api",
+                source=source if source in {"panel", "whatsapp", "slack", "api"} else "api",
                 event_date=session.selected_event_date,
                 calendar_event=snapshot.model_copy(deep=True),
                 external_id=external_id,
@@ -537,6 +545,9 @@ class SessionService:
         group_participant_count: int | None = None,
         group_participant_ids: list[str] | None = None,
         coordinator_ids: list[str] | None = None,
+        owner_admin: str | None = None,
+        actor: str | None = None,
+        is_superadmin: bool = False,
     ) -> Session:
         session = self.get(session_id)
         previous_window = (
@@ -579,6 +590,21 @@ class SessionService:
             session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
         if coordinator_ids is not None:
             session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
+        if owner_admin is not None:
+            current_owner = session.channel_config.owner_admin
+            next_owner = owner_admin.strip() or None
+            # Sesion sin dueno: cualquier admin autenticado puede reclamarla.
+            # El dueno actual puede liberar su propio grupo (queda sin dueno).
+            # Reasignarlo a otro admin especifico, en cambio, solo lo puede
+            # hacer un superadmin (evita que un area le "pase" el grupo a
+            # otra sin supervision).
+            self_release = current_owner == actor and next_owner is None
+            if current_owner and current_owner != next_owner and not is_superadmin and not self_release:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Este grupo ya tiene un administrador asignado; solo un superadmin puede reasignarlo.",
+                )
+            session.channel_config.owner_admin = next_owner
         roster_changed = previous_roster != (
             session.channel_config.group_participant_count,
             tuple(sorted(session.channel_config.group_participant_ids)),

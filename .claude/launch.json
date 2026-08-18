@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "coordina-dev",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "-f", "coordinador-simple-mvp/docker-compose.yml", "up", "--build"],
+      "port": 5173
+    }
+  ]
+}

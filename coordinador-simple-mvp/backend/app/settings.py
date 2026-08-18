@@ -130,6 +130,11 @@ class Settings:
         "ADMIN_PROXY_HEADER_REQUIRED",
         app_env == "production",
     )
+    # Usuarios de Basic Auth (X-Coordina-Admin) que ven y administran todos
+    # los grupos, sin importar quien sea el owner_admin de cada sesion.
+    superadmin_users: set[str] = {
+        u.strip() for u in os.getenv("SUPERADMIN_USERS", "").split(",") if u.strip()
+    }
 
     # Canal Slack (opcional, ademas de WhatsApp). Sin bot token el canal queda
     # desactivado: el endpoint responde 503 en vez de fallar silenciosamente.

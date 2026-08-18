@@ -266,6 +266,7 @@ export function configureChannel(
     trigger_word?: string;
     workday_start_hour?: number;
     workday_end_hour?: number;
+    owner_admin?: string | null;
   }
 ) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/channel/config`, {

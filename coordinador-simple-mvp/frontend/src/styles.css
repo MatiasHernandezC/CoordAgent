@@ -281,7 +281,8 @@ p {
 
 .metrics-row {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* Cantidad de tiles varia segun el rol (admin de grupo ve menos que superadmin). */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
   margin: 12px 0;
 }

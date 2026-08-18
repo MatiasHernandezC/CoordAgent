@@ -74,14 +74,32 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {settings.slack_bot_token}"}
 
 
-def post_message(channel: str, text: str) -> None:
+def post_message(channel: str, text: str, blocks: list[dict] | None = None) -> None:
+    payload: dict = {"channel": channel, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
     response = requests.post(
         f"{SLACK_API_BASE}/chat.postMessage",
         headers=_headers(),
-        json={"channel": channel, "text": text},
+        json=payload,
         timeout=20,
     )
     _raise_for_slack_error(response)
+
+
+def respond_to_url(response_url: str, text: str, *, replace_original: bool = True) -> None:
+    """Responde al webhook de un solo uso de un click de Block Kit. No lleva
+    auth propio (la URL misma es el secreto de corta duracion que da Slack)."""
+    try:
+        response = requests.post(
+            response_url,
+            json={"text": text, "replace_original": replace_original},
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            logger.error("slack_response_url_failed status=%s", response.status_code)
+    except requests.RequestException as error:
+        logger.error("slack_response_url_failed error=%s", error)
 
 
 def upload_file(
