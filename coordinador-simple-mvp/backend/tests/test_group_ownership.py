@@ -111,6 +111,85 @@ def test_superadmin_can_reassign_and_release(client):
     assert released.json()["session"]["channel_config"]["owner_admin"] is None
 
 
+def test_unowned_session_can_only_be_claimed_for_self(client):
+    session_id = _create(client, "Grupo nuevo")
+
+    stolen = _claim(client, session_id, "ti_admin", "otro_admin")
+    assert stolen.status_code == 403
+
+    claimed = _claim(client, session_id, "ti_admin", "ti_admin")
+    assert claimed.status_code == 200
+    assert claimed.json()["session"]["channel_config"]["owner_admin"] == "ti_admin"
+
+
+def test_mutating_endpoints_respect_group_access(client):
+    session_id = _create(client, "Grupo Finanzas")
+    assert _claim(client, session_id, "boss", "finanzas").status_code == 200
+    owner_headers = {"X-Coordina-Admin": "finanzas"}
+    other_headers = {"X-Coordina-Admin": "ti_admin"}
+
+    assert client.post(
+        f"/api/sessions/{session_id}/participants", json={"name": "Ana"}, headers=other_headers
+    ).status_code == 403
+    assert client.post(
+        f"/api/sessions/{session_id}/participants", json={"name": "Ana"}, headers=owner_headers
+    ).status_code == 200
+
+    assert client.post(
+        f"/api/sessions/{session_id}/participants/requirements",
+        json={"name": "Ana", "required": True},
+        headers=other_headers,
+    ).status_code == 403
+    assert client.post(
+        f"/api/sessions/{session_id}/participants/requirements",
+        json={"name": "Ana", "required": True},
+        headers=owner_headers,
+    ).status_code == 200
+
+    assert client.post(
+        f"/api/sessions/{session_id}/availability",
+        json={"participant_name": "Ana", "day": "lunes", "start": "09:00", "end": "10:00"},
+        headers=other_headers,
+    ).status_code == 403
+    assert client.post(
+        f"/api/sessions/{session_id}/availability",
+        json={"participant_name": "Ana", "day": "lunes", "start": "09:00", "end": "10:00"},
+        headers=owner_headers,
+    ).status_code == 200
+
+    assert client.post(f"/api/sessions/{session_id}/calculate", headers=other_headers).status_code == 403
+    assert client.post(f"/api/sessions/{session_id}/calculate", headers=owner_headers).status_code == 200
+
+    assert client.post(f"/api/sessions/{session_id}/cancel-decision", headers=other_headers).status_code == 403
+    # No hay decision confirmada que cancelar (400), pero eso prueba que el
+    # gate de acceso ya no es lo que bloquea al dueno.
+    assert client.post(f"/api/sessions/{session_id}/cancel-decision", headers=owner_headers).status_code == 400
+
+    assert client.post(
+        f"/api/sessions/{session_id}/message", json={"message": "hola"}, headers=other_headers
+    ).status_code == 403
+    assert client.post(
+        f"/api/sessions/{session_id}/message", json={"message": "hola"}, headers=owner_headers
+    ).status_code == 200
+
+    assert client.get(f"/api/sessions/{session_id}/export", headers=other_headers).status_code == 403
+    assert client.get(f"/api/sessions/{session_id}/export", headers=owner_headers).status_code == 200
+
+    assert client.get(f"/api/sessions/{session_id}/export.csv", headers=other_headers).status_code == 403
+    assert client.get(f"/api/sessions/{session_id}/export.csv", headers=owner_headers).status_code == 200
+
+    assert client.delete(
+        f"/api/sessions/{session_id}/participants/Ana", headers=other_headers
+    ).status_code == 403
+    assert client.delete(
+        f"/api/sessions/{session_id}/participants/Ana", headers=owner_headers
+    ).status_code == 200
+
+    # Sin opcion confirmada el endpoint devolveria 400, pero el gate de acceso
+    # debe cortar antes con 403 para quien no es dueno del grupo.
+    assert client.get(f"/api/sessions/{session_id}/calendar", headers=other_headers).status_code == 403
+
+
 def test_archive_endpoint_respects_group_access(client):
     session_id = _create(client, "Grupo Finanzas")
     assert _claim(client, session_id, "boss", "finanzas").status_code == 200

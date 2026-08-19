@@ -65,7 +65,11 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: http://localhost:8080
+        # Vacio a proposito: URL relativa (mismo origen que sirve Caddy en
+        # :8080). Si va fijo a "localhost" y entras por "127.0.0.1" (o al
+        # reves), el navegador los trata como origenes distintos y bloquea
+        # las llamadas /api por CORS.
+        VITE_API_URL: ""
     depends_on:
       - backend
 

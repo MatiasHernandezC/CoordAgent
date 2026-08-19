@@ -132,17 +132,20 @@ services:
       BASIC_AUTH_USER: ${BASIC_AUTH_USER:?define BASIC_AUTH_USER en .env.prod}
       BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?define BASIC_AUTH_HASH en .env.prod}
       # Admins adicionales (uno por area, ej. Finanzas/TI). Slots sin usar
-      # quedan con un usuario/hash inertes: el hash es de una password
-      # aleatoria que nunca se documenta, asi que ese login nunca es valido
-      # en la practica, pero Caddy no acepta basic_auth con campos vacios.
+      # quedan con un usuario/hash inertes: cada uno es el hash de una
+      # password aleatoria distinta (nunca documentada), asi que ese login
+      # nunca es valido en la practica y ademas ningun slot comparte
+      # credenciales con otro. Caddy no acepta basic_auth con campos vacios,
+      # por eso el placeholder en vez de dejarlo en blanco. Sobreescribe en
+      # .env.prod para habilitar un slot de verdad.
       BASIC_AUTH_USER_2: ${BASIC_AUTH_USER_2:-_disabled_2}
-      BASIC_AUTH_HASH_2: ${BASIC_AUTH_HASH_2:-$$2a$$14$$NTgh6xXbfiBVCEeAsu4BruKQJPk21mS./iHxE3kotyHNdTvOX4RjK}
+      BASIC_AUTH_HASH_2: ${BASIC_AUTH_HASH_2:-$$2a$$14$$u/akr20Re8eW4fnzgG0dAeIXf4zad4ITa60kZdAmPbZuMu4LN96x.}
       BASIC_AUTH_USER_3: ${BASIC_AUTH_USER_3:-_disabled_3}
-      BASIC_AUTH_HASH_3: ${BASIC_AUTH_HASH_3:-$$2a$$14$$NTgh6xXbfiBVCEeAsu4BruKQJPk21mS./iHxE3kotyHNdTvOX4RjK}
+      BASIC_AUTH_HASH_3: ${BASIC_AUTH_HASH_3:-$$2a$$14$$MSnkVSIh0Dkot7DFhXBJX.8qRPzdaELLR8iyUY6SMzvkD.4siXQy2}
       BASIC_AUTH_USER_4: ${BASIC_AUTH_USER_4:-_disabled_4}
-      BASIC_AUTH_HASH_4: ${BASIC_AUTH_HASH_4:-$$2a$$14$$NTgh6xXbfiBVCEeAsu4BruKQJPk21mS./iHxE3kotyHNdTvOX4RjK}
+      BASIC_AUTH_HASH_4: ${BASIC_AUTH_HASH_4:-$$2a$$14$$1gG4VoLwdv.tLlmeLCIx6.hFIMQ8MhL5UqtKp0bxgw4cKcp/IjX7G}
       BASIC_AUTH_USER_5: ${BASIC_AUTH_USER_5:-_disabled_5}
-      BASIC_AUTH_HASH_5: ${BASIC_AUTH_HASH_5:-$$2a$$14$$NTgh6xXbfiBVCEeAsu4BruKQJPk21mS./iHxE3kotyHNdTvOX4RjK}
+      BASIC_AUTH_HASH_5: ${BASIC_AUTH_HASH_5:-$$2a$$14$$scXa2qJ9gYxP68mGmfk0uuBf35BDgeMApkn5FAYiY6dFOyW//Uz02}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

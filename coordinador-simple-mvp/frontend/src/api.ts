@@ -1,4 +1,4 @@
-import type { GoogleCalendarStatus, LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
+import type { AdminUser, GoogleCalendarStatus, LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "coordina.basicAuth";
@@ -155,6 +155,17 @@ export function getGoogleCalendarAuthUrl() {
 
 export function disconnectGoogleCalendar() {
   return request<{ disconnected: boolean }>("/api/admin/google-calendar/disconnect", { method: "POST" });
+}
+
+export function getAdminUsers() {
+  return request<{ users: AdminUser[] }>("/api/admin/users", { method: "GET" });
+}
+
+export function setAdminSuperadmin(actor: string, isSuperadmin: boolean) {
+  return request<{ users: AdminUser[] }>(`/api/admin/users/${encodeURIComponent(actor)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_superadmin: isSuperadmin })
+  });
 }
 
 export function validateLogin(credentials: AuthCredentials) {

@@ -497,3 +497,20 @@ class GoogleCalendarStatus(BaseModel):
 
 class GoogleCalendarAuthUrl(BaseModel):
     auth_url: str
+
+
+class AdminUser(BaseModel):
+    actor: str
+    is_superadmin: bool
+    superadmin_locked: bool
+    first_seen_at: str | None = None
+    last_seen_at: str | None = None
+    owned_groups: int = 0
+
+
+class AdminUserListResponse(BaseModel):
+    users: list[AdminUser]
+
+
+class UpdateAdminUserRequest(BaseModel):
+    is_superadmin: bool

@@ -15,6 +15,7 @@ import {
   exportCalendar,
   exportSession,
   exportSessionCsv,
+  getAdminUsers,
   getSavedAuth,
   getGoogleCalendarAuthUrl,
   getGoogleCalendarStatus,
@@ -26,6 +27,7 @@ import {
   reopenSession,
   saveAuth,
   sendChannelBatch,
+  setAdminSuperadmin,
   testLlmKey,
   updateLlmKey,
   updateReplyFormat,
@@ -34,10 +36,11 @@ import {
   type AuthCredentials
 } from "./api";
 import { CHANNEL_EXAMPLE } from "./constants";
+import { AdminUsersPanel } from "./components/AdminUsersPanel";
 import { GeminiKeyPanel } from "./components/GeminiKeyPanel";
 import { GoogleCalendarPanel } from "./components/GoogleCalendarPanel";
 import { getErrorMessage } from "./format";
-import type { Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
+import type { AdminUser, Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
 const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
 const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
@@ -64,6 +67,7 @@ export function App() {
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [llmKeyState, setLlmKeyState] = useState<LlmKeyListResponse | null>(null);
   const [googleCalendarState, setGoogleCalendarState] = useState<GoogleCalendarStatus | null>(null);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[] | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -162,9 +166,13 @@ export function App() {
       .then((info) => {
         setRuntime(info);
         setAuthState("authenticated");
-        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]).catch((err) =>
-          setError(getErrorMessage(err))
-        );
+        Promise.all([
+          refreshSessions(undefined, { quiet: true }),
+          refreshOpsStatus(),
+          refreshLlmKeys(),
+          refreshGoogleCalendar(),
+          refreshAdminUsers(info.is_superadmin)
+        ]).catch((err) => setError(getErrorMessage(err)));
       })
       .catch(() => {
         clearAuth();
@@ -176,7 +184,13 @@ export function App() {
     if (authState !== "authenticated" || !autoRefresh) return;
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible" || busyRef.current) return;
-      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()])
+      Promise.all([
+        refreshSessions(session?.id, { quiet: true }),
+        refreshOpsStatus(),
+        refreshLlmKeys(),
+        refreshGoogleCalendar(),
+        refreshAdminUsers()
+      ])
         .then(() => setError(""))
         .catch((err) => setError(getErrorMessage(err)));
     }, AUTO_REFRESH_MS);
@@ -243,6 +257,15 @@ export function App() {
     setGoogleCalendarState(response);
   }
 
+  async function refreshAdminUsers(superadmin = isSuperadmin) {
+    if (!superadmin) {
+      setAdminUsers(null);
+      return;
+    }
+    const response = await getAdminUsers();
+    setAdminUsers(response.users);
+  }
+
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
     const credentials: AuthCredentials = {
@@ -255,7 +278,13 @@ export function App() {
       saveAuth(credentials);
       setRuntime(info);
       setAuthState("authenticated");
-      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
+      await Promise.all([
+        refreshSessions(undefined, { quiet: true }),
+        refreshOpsStatus(),
+        refreshLlmKeys(),
+        refreshGoogleCalendar(),
+        refreshAdminUsers(info.is_superadmin)
+      ]);
     });
   }
 
@@ -265,6 +294,7 @@ export function App() {
     setOpsStatus(null);
     setLlmKeyState(null);
     setGoogleCalendarState(null);
+    setAdminUsers(null);
     setSession(null);
     setSessions([]);
     setLoginPassword("");
@@ -275,6 +305,7 @@ export function App() {
     await runAction("Actualizando panel...", async () => {
       const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
       setRuntime(info);
+      await refreshAdminUsers(info.is_superadmin);
     });
   }
 
@@ -330,6 +361,13 @@ export function App() {
     await runAction("Desconectando Google Calendar...", async () => {
       await disconnectGoogleCalendar();
       await refreshGoogleCalendar();
+    });
+  }
+
+  async function handleSetAdminSuperadmin(actor: string, superadmin: boolean) {
+    await runAction(superadmin ? `Haciendo superadmin a ${actor}...` : `Quitando superadmin a ${actor}...`, async () => {
+      const response = await setAdminSuperadmin(actor, superadmin);
+      setAdminUsers(response.users);
     });
   }
 
@@ -1000,6 +1038,12 @@ export function App() {
                 busy={isBusy}
                 onConnect={handleConnectGoogleCalendar}
                 onDisconnect={handleDisconnectGoogleCalendar}
+              />
+
+              <AdminUsersPanel
+                users={adminUsers}
+                busy={isBusy}
+                onSetSuperadmin={handleSetAdminSuperadmin}
               />
             </>
           ) : null}

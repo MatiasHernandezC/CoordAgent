@@ -131,10 +131,13 @@ class Settings:
         app_env == "production",
     )
     # Usuarios de Basic Auth (X-Coordina-Admin) que ven y administran todos
-    # los grupos, sin importar quien sea el owner_admin de cada sesion.
+    # los grupos, sin importar quien sea el owner_admin de cada sesion. Es un
+    # piso fijo (no se puede quitar desde el panel); ademas se puede promover
+    # a otros admins a superadmin desde /admin/users sin tocar esta variable.
     superadmin_users: set[str] = {
         u.strip() for u in os.getenv("SUPERADMIN_USERS", "").split(",") if u.strip()
     }
+    admin_directory_file: Path = Path(os.getenv("ADMIN_DIRECTORY_FILE", "data/admin_directory.json"))
 
     # Canal Slack (opcional, ademas de WhatsApp). Sin bot token el canal queda
     # desactivado: el endpoint responde 503 en vez de fallar silenciosamente.

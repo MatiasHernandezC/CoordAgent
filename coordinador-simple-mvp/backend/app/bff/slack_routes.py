@@ -212,12 +212,10 @@ def _handle_block_action(payload: dict) -> None:
         return
 
     try:
-        session = session_service.get(session_id)
         sender = resolve_display_name(user_id)
         with session_service.session_lock(session_id):
             _session, reply, document, document_name, document_mimetype = execute_confirm_command(
                 session_id,
-                session,
                 option_id=option_id,
                 confirmed_by=sender,
                 source="slack",

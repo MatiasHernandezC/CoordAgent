@@ -151,6 +151,15 @@ export type GoogleCalendarStatus = {
   connected_at: string | null;
 };
 
+export type AdminUser = {
+  actor: string;
+  is_superadmin: boolean;
+  superadmin_locked: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  owned_groups: number;
+};
+
 export type Session = {
   id: string;
   schema_version?: number;

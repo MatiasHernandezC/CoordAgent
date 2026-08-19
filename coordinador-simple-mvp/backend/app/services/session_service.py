@@ -100,6 +100,14 @@ class SessionService:
             if not session.channel_config.owner_admin or session.channel_config.owner_admin == actor
         ]
 
+    def count_owned_by_actor(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for session in repository.list_all():
+            owner = session.channel_config.owner_admin
+            if owner:
+                counts[owner] = counts.get(owner, 0) + 1
+        return counts
+
     def resolve_channel_group(
         self,
         group_jid: str,
@@ -593,16 +601,27 @@ class SessionService:
         if owner_admin is not None:
             current_owner = session.channel_config.owner_admin
             next_owner = owner_admin.strip() or None
-            # Sesion sin dueno: cualquier admin autenticado puede reclamarla.
+            # Sesion sin dueno: cualquier admin autenticado puede reclamarla,
+            # pero solo para si mismo (next_owner debe ser su propio actor).
             # El dueno actual puede liberar su propio grupo (queda sin dueno).
             # Reasignarlo a otro admin especifico, en cambio, solo lo puede
             # hacer un superadmin (evita que un area le "pase" el grupo a
             # otra sin supervision).
             self_release = current_owner == actor and next_owner is None
-            if current_owner and current_owner != next_owner and not is_superadmin and not self_release:
+            self_claim = current_owner is None and next_owner == actor
+            if (
+                next_owner != current_owner
+                and not is_superadmin
+                and not self_release
+                and not self_claim
+            ):
                 raise HTTPException(
                     status_code=403,
-                    detail="Este grupo ya tiene un administrador asignado; solo un superadmin puede reasignarlo.",
+                    detail=(
+                        "Este grupo ya tiene un administrador asignado; solo un superadmin puede reasignarlo."
+                        if current_owner
+                        else "Solo puedes reclamar un grupo para ti mismo."
+                    ),
                 )
             session.channel_config.owner_admin = next_owner
         roster_changed = previous_roster != (
