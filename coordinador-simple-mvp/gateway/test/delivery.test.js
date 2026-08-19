@@ -36,5 +36,6 @@ test("si falla el documento reintenta sin duplicar el texto", async () => {
   await sendAgentReply({ sock, jid: "grupo", result, pendingItem: item, markProgress });
   assert.equal(item.documentSent, true);
   assert.equal(calls.filter((call) => call.payload.text).length, 1);
+  assert.equal(calls.find((call) => call.payload.text).payload.linkPreview, null);
   assert.equal(calls.filter((call) => call.payload.document).length, 2);
 });

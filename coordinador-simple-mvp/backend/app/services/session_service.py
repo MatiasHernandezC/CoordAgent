@@ -1,5 +1,6 @@
 import csv
 import re
+import secrets
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -73,32 +74,78 @@ class SessionService:
         with lock:
             yield
 
-    def create(self, title: str) -> Session:
+    def create(
+        self,
+        title: str,
+        *,
+        owner_username: str | None = None,
+        prepare_whatsapp: bool = False,
+    ) -> Session:
+        clean_owner = owner_username.strip().lower() if owner_username else None
         session = Session(
             title=title,
+            owner_username=clean_owner,
+            assigned_usernames=[clean_owner] if clean_owner else [],
+            link_code=self._new_link_code() if prepare_whatsapp else None,
             messages=[
                 ChatMessage(
                     role="system",
-                    content="Sesion creada. Escribe disponibilidad en lenguaje natural para estructurarla.",
+                    content=(
+                        "Grupo creado por su propietario. Agrega el bot a WhatsApp y usa el codigo de vinculacion."
+                        if prepare_whatsapp
+                        else "Sesion creada. Escribe disponibilidad en lenguaje natural para estructurarla."
+                    ),
                 )
             ],
         )
         return repository.save(session)
 
-    def list_sessions(self, actor: str | None = None, is_superadmin: bool = False) -> list[Session]:
+    def _new_link_code(self) -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        existing = {session.link_code for session in repository.list_all() if session.link_code}
+        for _ in range(20):
+            code = "".join(secrets.choice(alphabet) for _ in range(10))
+            if code not in existing:
+                return code
+        raise HTTPException(status_code=503, detail="No fue posible generar un codigo de vinculacion.")
+
+    def list_sessions(self) -> list[Session]:
         sessions = repository.list_all()
         for session in sessions:
             if normalize_generated_contact_labels(session):
                 repository.save(session)
-        if actor is None or is_superadmin:
-            return sessions
-        # Un admin de area ve las sesiones sin dueno (todavia no reclamadas)
-        # y las suyas propias; el resto queda fuera de la lista.
-        return [
-            session
-            for session in sessions
-            if not session.channel_config.owner_admin or session.channel_config.owner_admin == actor
-        ]
+        return sessions
+
+    def assign_users(self, session_id: str, usernames: list[str]) -> Session:
+        session = self.get(session_id)
+        session.assigned_usernames = sorted({value.strip().lower() for value in usernames if value.strip()})
+        session.messages.append(
+            ChatMessage(
+                role="system",
+                content=(
+                    "Acceso del panel actualizado: "
+                    + (", ".join(session.assigned_usernames) if session.assigned_usernames else "sin usuarios asignados")
+                    + "."
+                ),
+            )
+        )
+        return repository.save(session)
+
+    def assign_chief(self, session_id: str, participant_id: str) -> Session:
+        session = self.get(session_id)
+        participant = next((item for item in session.participants if item.id == participant_id), None)
+        if not participant:
+            raise HTTPException(status_code=404, detail="La persona seleccionada no pertenece a este grupo.")
+        session.chief_participant_id = participant.id
+        # El jefe se refleja tambien en el motor existente de prioridades, sin
+        # borrar una marca 'required' que el administrador haya configurado.
+        for item in session.participants:
+            item.priority = 10 if item.id == participant.id else min(item.priority, 9)
+        refresh_schedule_state(session)
+        session.messages.append(
+            ChatMessage(role="system", content=f"{participant.name} fue asignado como jefe del grupo.")
+        )
+        return repository.save(session)
 
     def resolve_channel_group(
         self,
@@ -109,6 +156,7 @@ class SessionService:
         coordinator_ids: list[str],
         trigger_word: str,
         channel_label: str = "WhatsApp",
+        create_if_missing: bool = True,
     ) -> Session:
         """Create-or-get atomico por JID; un retry nunca crea otra sesion."""
         clean_jid = group_jid.strip()
@@ -145,6 +193,9 @@ class SessionService:
                         refresh_schedule_state(current)
                     return repository.save(current)
 
+        if not create_if_missing:
+            raise HTTPException(status_code=404, detail="Este grupo todavia no esta vinculado a una cuenta.")
+
         session = Session(
             title=f"{channel_label} - {clean_name}",
             channel_config=ChannelConfig(
@@ -167,6 +218,64 @@ class SessionService:
             ],
         )
         return repository.save(session)
+
+    def link_channel_group(
+        self,
+        link_code: str,
+        group_jid: str,
+        group_name: str,
+        group_participant_count: int | None,
+        group_participant_ids: list[str],
+        coordinator_ids: list[str],
+        trigger_word: str,
+    ) -> Session:
+        clean_code = re.sub(r"[^A-Z0-9]", "", link_code.upper())
+        clean_jid = group_jid.strip()
+        sessions = repository.list_all()
+        target = next(
+            (
+                session
+                for session in sessions
+                if session.link_code and secrets.compare_digest(session.link_code, clean_code)
+            ),
+            None,
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Codigo de vinculacion invalido o ya utilizado.")
+        if target.archived_at:
+            raise HTTPException(status_code=409, detail="El grupo pendiente esta archivado.")
+
+        occupied = next(
+            (
+                session
+                for session in sessions
+                if session.id != target.id and session.channel_config.group_jid == clean_jid
+            ),
+            None,
+        )
+        if occupied:
+            raise HTTPException(status_code=409, detail="Este grupo de WhatsApp ya esta vinculado.")
+
+        with self.session_lock(target.id):
+            session = self.get(target.id)
+            if not session.link_code or not secrets.compare_digest(session.link_code, clean_code):
+                raise HTTPException(status_code=409, detail="El codigo ya fue utilizado.")
+            session.channel_config.trigger_word = trigger_word.strip()
+            session.channel_config.group_jid = clean_jid
+            session.channel_config.group_name = group_name.strip() or session.title
+            session.channel_config.group_participant_count = group_participant_count
+            session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
+            session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
+            session.title = f"WhatsApp - {session.channel_config.group_name}"
+            session.linked_at = datetime.now(timezone.utc).isoformat()
+            session.link_code = None
+            session.messages.append(
+                ChatMessage(
+                    role="system",
+                    content=f"Grupo de WhatsApp vinculado correctamente: {session.channel_config.group_name}.",
+                )
+            )
+            return repository.save(session)
 
     def get(self, session_id: str) -> Session:
         session = repository.get(session_id)
@@ -339,9 +448,19 @@ class SessionService:
         session = self.get(session_id)
         before = len(session.participants)
         target_id = clean_external_id(target_external_id)
+        previous_participants = merge_duplicate_participants(session.participants)
+        removed_ids = {
+            participant.id
+            for participant in previous_participants
+            if (
+                target_id in participant_identity_ids(participant)
+                if target_id
+                else participant_key(participant.name) == participant_key(name)
+            )
+        }
         session.participants = [
             participant
-            for participant in merge_duplicate_participants(session.participants)
+            for participant in previous_participants
             if (
                 target_id not in participant_identity_ids(participant)
                 if target_id
@@ -350,6 +469,8 @@ class SessionService:
         ]
         if len(session.participants) == before:
             raise HTTPException(status_code=404, detail="Participant not found")
+        if session.chief_participant_id in removed_ids:
+            session.chief_participant_id = None
 
         refresh_schedule_state(session)
         session.messages.append(ChatMessage(role="assistant", content=f"Participante quitado: {name.strip()}."))
@@ -593,11 +714,6 @@ class SessionService:
         if owner_admin is not None:
             current_owner = session.channel_config.owner_admin
             next_owner = owner_admin.strip() or None
-            # Sesion sin dueno: cualquier admin autenticado puede reclamarla.
-            # El dueno actual puede liberar su propio grupo (queda sin dueno).
-            # Reasignarlo a otro admin especifico, en cambio, solo lo puede
-            # hacer un superadmin (evita que un area le "pase" el grupo a
-            # otra sin supervision).
             self_release = current_owner == actor and next_owner is None
             if current_owner and current_owner != next_owner and not is_superadmin and not self_release:
                 raise HTTPException(

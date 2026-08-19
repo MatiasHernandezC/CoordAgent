@@ -13,45 +13,18 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 
-	# Sin Basic Auth: Slack no puede mandar esas credenciales. Se valida con
-	# su firma HMAC (X-Slack-Signature) dentro del backend.
+	# Slack se valida con su firma HMAC (X-Slack-Signature) dentro del backend.
 	handle /api/channels/slack/events {
 		reverse_proxy backend:8000
 	}
 
-	# Clicks de los botones de Block Kit (Interactivity & Shortcuts). Misma
-	# proteccion que /events: firma HMAC, no Basic Auth.
-	handle /api/channels/slack/interactions {
+	# El backend monta sus rutas bajo /api y expone /health.
+	handle /api/* {
+		# El backend valida cada cuenta y su rol. Esto permite varios usuarios
+		# sin exponer tokens ni configuracion administrativa.
 		reverse_proxy backend:8000
 	}
-
-	# El backend monta sus rutas bajo /api y expone /health.
-	# Hasta 5 admins (1 obligatorio + 4 opcionales). Los slots sin usar quedan
-	# con un usuario/hash inertes (ver docker-compose.prod.yml) porque Caddy
-	# no acepta una linea de basic_auth con usuario o hash vacio.
-	handle /api/* {
-		basic_auth {
-			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
-			{$BASIC_AUTH_USER_2} {$BASIC_AUTH_HASH_2}
-			{$BASIC_AUTH_USER_3} {$BASIC_AUTH_HASH_3}
-			{$BASIC_AUTH_USER_4} {$BASIC_AUTH_HASH_4}
-			{$BASIC_AUTH_USER_5} {$BASIC_AUTH_HASH_5}
-		}
-		reverse_proxy backend:8000 {
-			# Caddy sobrescribe este header despues de validar Basic Auth. El
-			# backend lo usa como X-Coordina-Admin: identidad del admin para
-			# auditoria y para filtrar que grupos puede ver/administrar.
-			header_up X-Coordina-Admin {http.auth.user.id}
-		}
-	}
 	handle /health {
-		basic_auth {
-			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
-			{$BASIC_AUTH_USER_2} {$BASIC_AUTH_HASH_2}
-			{$BASIC_AUTH_USER_3} {$BASIC_AUTH_HASH_3}
-			{$BASIC_AUTH_USER_4} {$BASIC_AUTH_HASH_4}
-			{$BASIC_AUTH_USER_5} {$BASIC_AUTH_HASH_5}
-		}
 		reverse_proxy backend:8000
 	}
 

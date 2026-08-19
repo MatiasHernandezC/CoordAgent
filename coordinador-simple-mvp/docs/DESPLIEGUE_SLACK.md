@@ -57,9 +57,8 @@ pruebas.
    privados tambien agrega `message.groups` + scopes `groups:history`/`groups:read`.
 4. Guarda. Si Slack pide reinstalar el app (banner amarillo), hazlo.
 
-En produccion, Caddy deja `/api/channels/slack/events` sin Basic Auth (ver
-`Caddyfile`) porque Slack no puede mandar esas credenciales — la autenticacion
-real es la firma `X-Slack-Signature`, verificada en cada request.
+En produccion, `/api/channels/slack/events` no usa una cuenta del panel: la
+autenticacion real es la firma `X-Slack-Signature`, verificada en cada request.
 
 ## 4. Botones para confirmar (Interactivity & Shortcuts)
 

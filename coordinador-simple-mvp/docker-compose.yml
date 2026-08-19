@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: meetingdb
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +18,7 @@ services:
   backend:
     build: ./backend
     environment:
-      APP_ENV: production
+      APP_ENV: development
       DB_BACKEND: postgres
       DATABASE_URL: postgresql://postgres:postgres@db:5432/meetingdb
       # mock = sin dependencias externas. Corre con --env-file backend/.env para
@@ -30,10 +30,13 @@ services:
       # Sin Caddy en dev no hay header X-Coordina-Admin: sin esto el panel
       # (llaves Gemini, Google Calendar) devuelve 401.
       ADMIN_PROXY_HEADER_REQUIRED: ${ADMIN_PROXY_HEADER_REQUIRED:-false}
-      # Solo aplica cuando se entra via el Caddy de prueba (ver servicio
-      # "caddy" y Caddyfile.dev): "coordina" ve/administra todos los grupos.
-      SUPERADMIN_USERS: coordina
-      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080
+      PANEL_AUTH_REQUIRED: ${PANEL_AUTH_REQUIRED:-true}
+      PANEL_ADMIN_USERNAME: ${PANEL_ADMIN_USERNAME:-admin}
+      PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:-admin-local}
+      PANEL_SEED_DEMO_USERS: ${PANEL_SEED_DEMO_USERS:-true}
+      PANEL_SELF_REGISTRATION_ENABLED: ${PANEL_SELF_REGISTRATION_ENABLED:-true}
+      GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:-local-gateway-only}
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
       SLACK_TRIGGER_WORD: ${SLACK_TRIGGER_WORD:-@coordina}
@@ -41,7 +44,7 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -51,40 +54,54 @@ services:
       context: ./frontend
       args:
         # URL a la que el navegador llama al backend. Cambiala para desplegar en la nube.
-        VITE_API_URL: http://127.0.0.1:8000
+        VITE_API_URL: http://127.0.0.1:8001
     ports:
-      - "5173:80"
+      # 5173 queda disponible para el servidor Vite local existente.
+      - "127.0.0.1:5174:80"
     depends_on:
       - backend
 
-  # --- Solo para probar localmente la administracion por grupos (owner_admin) ---
-  # No se usa en produccion. El flujo normal de dev (:5173 sin Basic Auth) sigue
-  # igual; esto agrega ademas http://localhost:8080 con Basic Auth real, para
-  # loguearse como distintos admins y ver el filtrado por grupo funcionando.
-  frontend-caddy-test:
-    build:
-      context: ./frontend
-      args:
-        VITE_API_URL: http://localhost:8080
-    depends_on:
-      - backend
-
-  caddy:
-    image: caddy:2
+  gateway:
+    build: ./gateway
     environment:
-      # coordina/coordina123 -> superadmin (ve todos los grupos).
-      BASIC_AUTH_USER: coordina
-      BASIC_AUTH_HASH: '$$2a$$14$$XgJxlDvUL/dJ1pPjxqLaF.qUSt/wjy14otlT4k/vtVScqViff3N2e'
-      # finanzas/finanzas123 -> admin de area (solo sus grupos reclamados).
-      BASIC_AUTH_USER_2: finanzas
-      BASIC_AUTH_HASH_2: '$$2a$$14$$Qsi5Jc22OT0IWzt/e1I0duyLgePrifCWiPlT.Gzmo/xocIYw6YAvy'
-    ports:
-      - "8080:80"
+      BACKEND_URL: http://backend:8000
+      GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:-local-gateway-only}
+      TRIGGER_WORD: ${TRIGGER_WORD:-@coordina}
+      WA_AUTH_DIR: /data/wa-auth
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-75000}
+      WA_CONNECT_TIMEOUT_MS: ${WA_CONNECT_TIMEOUT_MS:-60000}
+      WA_KEEP_ALIVE_MS: ${WA_KEEP_ALIVE_MS:-30000}
+      WA_RECONNECT_MIN_MS: ${WA_RECONNECT_MIN_MS:-2000}
+      WA_RECONNECT_MAX_MS: ${WA_RECONNECT_MAX_MS:-60000}
+      WA_GROUP_SYNC_INTERVAL_MS: ${WA_GROUP_SYNC_INTERVAL_MS:-300000}
+      WA_FIRE_INIT_QUERIES: ${WA_FIRE_INIT_QUERIES:-false}
+      GATEWAY_HEARTBEAT_INTERVAL_MS: ${GATEWAY_HEARTBEAT_INTERVAL_MS:-600000}
+      RECENT_MESSAGE_LIMIT: ${RECENT_MESSAGE_LIMIT:-500}
+      MAX_PENDING_MESSAGES: ${MAX_PENDING_MESSAGES:-500}
+      PENDING_RETRY_MIN_MS: ${PENDING_RETRY_MIN_MS:-2000}
+      PENDING_RETRY_MAX_MS: ${PENDING_RETRY_MAX_MS:-300000}
+      MAX_PENDING_ATTEMPTS: ${MAX_PENDING_ATTEMPTS:-12}
+      HEALTH_PORT: 8080
     volumes:
-      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - waauth:/data/wa-auth
     depends_on:
-      - backend
-      - frontend-caddy-test
+      backend:
+        condition: service_started
+    expose:
+      - "8080"
+    ports:
+      # Solo accesible desde este computador; sirve el QR limpio en /qr.
+      - "127.0.0.1:8082:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stdin_open: true
+    tty: true
 
 volumes:
   pgdata:
+  waauth:

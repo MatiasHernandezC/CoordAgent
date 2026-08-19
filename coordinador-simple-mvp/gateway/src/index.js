@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
 import makeWASocket, {
@@ -13,9 +14,15 @@ import qrcode from "qrcode-terminal";
 import { sendAgentReply } from "./delivery.js";
 import { buildHumanRoster, identitiesOverlap } from "./group_metadata.js";
 import { channelMessagePayload, messageIdentityMetadataOf, messageTextOf } from "./message_metadata.js";
+import { extractLinkCode, isCoordinaInvocation } from "./linking.js";
 import { PersistentQueue } from "./persistent_queue.js";
 
+const require = createRequire(import.meta.url);
+const QRCode = require("qrcode-terminal/vendor/QRCode");
+const QRErrorCorrectLevel = require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel");
+
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://backend:8000";
+const GATEWAY_API_TOKEN = process.env.GATEWAY_API_TOKEN ?? "";
 const TRIGGER_WORD = process.env.TRIGGER_WORD ?? "@coordina";
 const AUTH_DIR = process.env.WA_AUTH_DIR ?? "/data/wa-auth";
 const MAP_FILE = join(AUTH_DIR, "group-sessions.json");
@@ -58,7 +65,34 @@ let pendingDrainTimer = null;
 let groupSyncTimer = null;
 let queueOverflowCount = 0;
 let lastQueueErrorAt = null;
+let currentQrSvg = null;
 const recentMessageIds = new Set();
+
+function qrToSvg(value) {
+  const qr = new QRCode(-1, QRErrorCorrectLevel.L);
+  qr.addData(value);
+  qr.make();
+
+  const quietZone = 4;
+  const moduleCount = qr.getModuleCount();
+  const size = moduleCount + quietZone * 2;
+  const darkModules = [];
+
+  for (let row = 0; row < moduleCount; row += 1) {
+    for (let column = 0; column < moduleCount; column += 1) {
+      if (qr.modules[row][column]) {
+        darkModules.push(`<rect x="${column + quietZone}" y="${row + quietZone}" width="1" height="1"/>`);
+      }
+    }
+  }
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges">`,
+    `<rect width="100%" height="100%" fill="white"/>`,
+    `<g fill="black">${darkModules.join("")}</g>`,
+    "</svg>"
+  ].join("");
+}
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -148,7 +182,11 @@ async function api(path, options = {}) {
     const response = await fetch(`${BACKEND_URL}${path}`, {
       ...options,
       signal: controller.signal,
-      headers: { "Content-Type": "application/json", ...(options.headers ?? {}) }
+      headers: {
+        "Content-Type": "application/json",
+        ...(GATEWAY_API_TOKEN ? { "X-Coordina-Gateway": GATEWAY_API_TOKEN } : {}),
+        ...(options.headers ?? {})
+      }
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
@@ -230,7 +268,8 @@ async function sessionForGroupUnlocked(sock, groupJid) {
       group_participant_count: metadata.participantCount,
       group_participant_ids: metadata.participantIds,
       coordinator_ids: metadata.coordinatorIds,
-      trigger_word: TRIGGER_WORD
+      trigger_word: TRIGGER_WORD,
+      create_if_missing: false
     })
   });
 
@@ -338,11 +377,13 @@ function handleConnectionUpdate(sock, update) {
   const { connection, lastDisconnect, qr } = update;
 
   if (qr) {
+    currentQrSvg = qrToSvg(qr);
     logger.info("Escanea este QR con el WhatsApp del numero dedicado en Dispositivos vinculados:");
     qrcode.generate(qr, { small: true });
   }
 
   if (connection === "open") {
+    currentQrSvg = null;
     reconnectAttempt = 0;
     connectionState = "connected";
     lastConnectedAt = new Date().toISOString();
@@ -479,7 +520,26 @@ async function drainPendingMessages(sock) {
 }
 
 async function processPendingMessage(sock, item) {
-  const sessionId = await sessionForGroup(sock, item.jid);
+  const linkCode = extractLinkCode(item.text, TRIGGER_WORD);
+  if (linkCode) {
+    await linkPendingGroup(sock, item, linkCode);
+    return;
+  }
+
+  let sessionId;
+  try {
+    sessionId = await sessionForGroup(sock, item.jid);
+  } catch (err) {
+    if (Number(err?.status) !== 404) throw err;
+    if (isCoordinaInvocation(item.text, TRIGGER_WORD)) {
+      await sendPlainReply(
+        sock,
+        item,
+        `Este grupo todavía no está vinculado. Crea el grupo desde el panel y envía aquí: *${TRIGGER_WORD} vincular TU_CODIGO*.`
+      );
+    }
+    return;
+  }
   const result = await api(`/api/sessions/${sessionId}/channel/messages`, {
     method: "POST",
     body: JSON.stringify(channelMessagePayload(item))
@@ -498,6 +558,48 @@ async function processPendingMessage(sock, item) {
       logger
     });
   }
+}
+
+async function linkPendingGroup(sock, item, linkCode) {
+  const metadata = await readGroupMetadata(sock, item.jid);
+  if (!metadata) throw new Error(`No se pudo leer la metadata de ${item.jid} para vincularlo`);
+
+  try {
+    const { session } = await api("/api/channel/groups/link", {
+      method: "POST",
+      body: JSON.stringify({
+        link_code: linkCode,
+        group_jid: item.jid,
+        group_name: metadata.groupName,
+        group_participant_count: metadata.participantCount,
+        group_participant_ids: metadata.participantIds,
+        coordinator_ids: metadata.coordinatorIds,
+        trigger_word: TRIGGER_WORD,
+        create_if_missing: false
+      })
+    });
+    groupSessions[item.jid] = mapEntry(session.id, item.jid, metadata);
+    saveGroupSessions(groupSessions);
+    await sendPlainReply(
+      sock,
+      item,
+      `✅ Grupo vinculado con *${session.title}*. Ya pueden escribir disponibilidades y usar *${TRIGGER_WORD}*.`
+    );
+    logger.info({ jid: item.jid, sessionId: session.id }, "grupo vinculado por codigo de propietario");
+  } catch (err) {
+    if (![404, 409].includes(Number(err?.status))) throw err;
+    await sendPlainReply(
+      sock,
+      item,
+      `No pude usar ese código. Revisa el código pendiente en tu panel y vuelve a enviar *${TRIGGER_WORD} vincular CODIGO*.`
+    );
+  }
+}
+
+async function sendPlainReply(sock, item, text) {
+  if (item.primarySent) return;
+  await sock.sendMessage(item.jid, { text, linkPreview: null });
+  pendingQueue.markProgress(item.id, { primarySent: true });
 }
 
 function schedulePendingDrain(sock) {
@@ -533,15 +635,30 @@ async function handleGroupParticipants(sock, event) {
     const botWasAdded = (participants ?? []).some((participant) => identitiesOverlap(participant, sock.user));
     if (!botWasAdded) return;
 
-    await sessionForGroup(sock, jid);
-    await sock.sendMessage(jid, { text: buildWelcomeMessage() });
+    let linked = true;
+    try {
+      await sessionForGroup(sock, jid);
+    } catch (err) {
+      if (Number(err?.status) !== 404) throw err;
+      linked = false;
+    }
+    await sock.sendMessage(jid, { text: buildWelcomeMessage(linked), linkPreview: null });
     logger.info({ jid }, "bienvenida enviada al grupo");
   } catch (err) {
     logger.error({ err: String(err) }, "error enviando la bienvenida al grupo");
   }
 }
 
-function buildWelcomeMessage() {
+function buildWelcomeMessage(linked = true) {
+  if (!linked) {
+    return [
+      "*Coordina*",
+      "",
+      "El bot ya está dentro del grupo, pero todavía falta vincularlo con su propietario.",
+      "Abre el panel, crea tu grupo y copia el código mostrado.",
+      `Después envía aquí: *${TRIGGER_WORD} vincular TU_CODIGO*.`
+    ].join("\n");
+  }
   return [
     "*Coordina*",
     "",
@@ -610,6 +727,21 @@ const healthServer = createServer((request, response) => {
   const path = request.url?.split("?", 1)[0] ?? "/";
   const live = !shuttingDown;
   const ready = status.connected;
+
+  if (request.method === "GET" && path === "/qr") {
+    if (!currentQrSvg) {
+      response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(status.connected ? "WhatsApp ya esta conectado." : "Esperando un QR nuevo. Recarga en unos segundos.");
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache"
+    });
+    response.end(currentQrSvg);
+    return;
+  }
 
   let statusCode = 404;
   let payload = { ok: false, detail: "not found" };

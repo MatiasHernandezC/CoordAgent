@@ -24,7 +24,7 @@ flowchart LR
   end
 
   subgraph Droplet["Droplet Docker"]
-    Caddy["Caddy\nTLS, headers, Basic Auth API"]
+    Caddy["Caddy\nTLS, proxy y headers"]
     Frontend["Frontend React/nginx"]
     Backend["FastAPI BFF"]
     Gateway["Gateway Baileys"]
@@ -50,10 +50,10 @@ flowchart LR
 
 | Componente | Responsabilidad |
 | --- | --- |
-| Caddy | Publica `80/443`, TLS automatico, headers de seguridad y Basic Auth para `/api/*` y `/health`. |
-| Frontend | Panel administrativo, login visual, listado de sesiones/grupos, historial, formato de respuesta e invitacion manual del bot. |
+| Caddy | Publica `80/443`, TLS automatico, headers de seguridad y proxy al backend. |
+| Frontend | Registro/login, panel global de plataforma y espacio aislado para que cada propietario cree, vincule y administre sus grupos. |
 | Backend FastAPI | API, validacion de esquemas, extraccion LLM, calculo de disponibilidad, persistencia y render de imagen. |
-| Gateway WhatsApp | Conecta un numero dedicado por Baileys, escucha grupos, crea/sincroniza sesiones y envia respuestas. |
+| Gateway WhatsApp | Conecta un numero dedicado por Baileys, valida códigos de propiedad, sincroniza grupos vinculados y envia respuestas. |
 | PostgreSQL | Guarda sesiones como JSONB, incluyendo participantes, historial, configuracion del canal y opciones. |
 | Gemini | Extrae disponibilidad desde lenguaje natural y devuelve JSON validado. |
 | Fallback por reglas | Mantiene la demo operativa ante fallas de Gemini o mensajes simples. |
@@ -72,8 +72,8 @@ sequenceDiagram
   UI->>C: GET /
   C-->>UI: App estatica
   A->>UI: Ingresa usuario/clave
-  UI->>C: GET /api/runtime con Basic Auth
-  C->>API: Proxy autorizado
+  UI->>C: GET /api/auth/me con credenciales
+  C->>API: Proxy HTTPS
   API-->>UI: Provider, modelo, cache, warnings
   UI->>API: GET /api/sessions
   API->>DB: Lee sesiones
@@ -81,8 +81,8 @@ sequenceDiagram
   API-->>UI: Sesiones y grupos
 ```
 
-Nota de seguridad: la pantalla de login vive en el frontend para mejorar la
-experiencia, pero la barrera real para datos y acciones es Basic Auth en Caddy.
+Nota de seguridad: la pantalla de login vive en el frontend, pero la barrera
+real para datos y acciones es la autenticacion y autorizacion del backend.
 
 ## Flujo WhatsApp
 
@@ -315,7 +315,7 @@ Ultima validacion local:
 
 - Solo Caddy expone puertos publicos `80/443`.
 - Backend, PostgreSQL y gateway no tienen puertos publicados al exterior.
-- `/api/*` y `/health` requieren Basic Auth configurado con hash bcrypt de Caddy.
+- `/api/*` requiere una cuenta valida; Slack usa firma HMAC y WhatsApp un secreto interno distinto.
 - `.env.prod`, `keys/`, `pgdata` y `waauth` no deben subirse al repositorio.
 - El frontend guarda las credenciales en `sessionStorage`, no en `localStorage`.
 - La API valida longitudes de mensajes y nombres antes de procesar.
@@ -359,7 +359,7 @@ Controles ya presentes:
 | PATCH | `/api/sessions/{id}/channel/config` | Configura canal, grupo y formato de respuesta. |
 | POST | `/api/sessions/{id}/channel/messages` | Ingesta un mensaje de WhatsApp/canal. |
 | POST | `/api/sessions/{id}/channel/batch` | Simula varios mensajes en una llamada. |
-| POST | `/api/channels/slack/events` | Events API de Slack (canal opcional). Sin Basic Auth; se autentica con firma HMAC de Slack. |
+| POST | `/api/channels/slack/events` | Events API de Slack (canal opcional), autenticada con firma HMAC de Slack. |
 | GET | `/api/admin/google-calendar/status` | Estado de la conexion OAuth (configurado/conectado/cuenta). |
 | GET | `/api/admin/google-calendar/auth-url` | URL de autorizacion de Google para conectar la cuenta admin. |
 | GET | `/api/admin/google-calendar/callback` | Redireccion OAuth de Google; guarda el refresh token cifrado. |
@@ -379,8 +379,8 @@ Controles ya presentes:
 
 ## Evolucion Recomendada
 
-1. Mover Basic Auth a usuarios reales si habra mas administradores.
-2. Agregar auditoria de acciones administrativas.
+1. Agregar rotacion y recuperacion administrada de contrasenas.
+2. Ampliar la auditoria de acciones administrativas.
 3. Crear migraciones formales si el esquema deja de ser flexible.
 4. Agregar rate limiting en Caddy o backend.
 5. Separar entornos `staging` y `production`.

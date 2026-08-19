@@ -5,7 +5,7 @@ Resumen corto de la arquitectura. Para la version completa y operativa, usa
 
 ```mermaid
 flowchart LR
-  Web["Panel React"] --> Caddy["Caddy HTTPS + Basic Auth API"]
+  Web["Panel React"] --> Caddy["Caddy HTTPS"]
   Caddy --> API["FastAPI BFF"]
   API --> DB["PostgreSQL"]
   API --> LLM["Gemini + fallback reglas"]
@@ -46,7 +46,7 @@ Caddy protege y publica el sistema.
 | `backend/` | API, extraccion, calculo, persistencia y render de imagen. |
 | `gateway/` | Conexion WhatsApp y puente al backend. |
 | `db` | PostgreSQL interno. |
-| `caddy` | TLS, proxy, headers y Basic Auth para API. |
+| `caddy` | TLS, proxy y headers; FastAPI valida cuentas y roles. |
 
 ## Regla De Diseno
 

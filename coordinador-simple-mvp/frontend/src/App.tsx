@@ -2,12 +2,15 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   addAvailability,
+  assignSessionChief,
+  assignSessionUsers,
   archiveSession,
   cancelDecision,
   clearAuth,
   configureChannel,
   confirmOption,
   configureParticipantRequirements,
+  createUser,
   createLlmKey,
   createSession,
   deleteLlmKey,
@@ -18,18 +21,20 @@ import {
   getSavedAuth,
   getGoogleCalendarAuthUrl,
   getGoogleCalendarStatus,
+  getCurrentUser,
   getOpsStatus,
   getRuntime,
   listLlmKeys,
+  listUsers,
   listSessions,
   removeParticipant,
+  registerUser,
   reopenSession,
   saveAuth,
   sendChannelBatch,
   testLlmKey,
   updateLlmKey,
   updateReplyFormat,
-  validateLogin,
   ApiError,
   type AuthCredentials
 } from "./api";
@@ -37,7 +42,7 @@ import { CHANNEL_EXAMPLE } from "./constants";
 import { GeminiKeyPanel } from "./components/GeminiKeyPanel";
 import { GoogleCalendarPanel } from "./components/GoogleCalendarPanel";
 import { getErrorMessage } from "./format";
-import type { Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
+import type { AppUser, Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
 const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
 const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
@@ -57,10 +62,19 @@ type SessionQuality = "archived" | "confirmed" | "ready" | "review" | "empty";
 
 export function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
-  const [loginUser, setLoginUser] = useState("coordina");
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [users, setUsers] = useState<AppUser[]>([]);
+  const [loginUser, setLoginUser] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [registerDisplayName, setRegisterDisplayName] = useState("");
+  const [registerUsername, setRegisterUsername] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [newOwnedGroupName, setNewOwnedGroupName] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [newDisplayName, setNewDisplayName] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
-  const isSuperadmin = runtime?.is_superadmin ?? false;
   const [opsStatus, setOpsStatus] = useState<OpsStatus | null>(null);
   const [llmKeyState, setLlmKeyState] = useState<LlmKeyListResponse | null>(null);
   const [googleCalendarState, setGoogleCalendarState] = useState<GoogleCalendarStatus | null>(null);
@@ -93,6 +107,10 @@ export function App() {
   const sessionsRequestSequence = useRef(0);
 
   const isBusy = Boolean(busyLabel);
+  const isAdmin = currentUser?.is_admin === true;
+  const ownsCurrentSession = Boolean(
+    session && currentUser && session.owner_username === currentUser.username
+  );
   const adminDigits = adminPhone.replace(/\D/g, "");
   const openSessionCount = sessions.filter((item) => !item.archived_at).length;
   const realGroupCount = sessions.filter((item) => !item.archived_at && item.channel_config.group_jid).length;
@@ -158,11 +176,14 @@ export function App() {
     }
 
     setLoginUser(savedAuth.username);
-    validateLogin(savedAuth)
-      .then((info) => {
-        setRuntime(info);
+    getCurrentUser(savedAuth)
+      .then(async ({ user }) => {
+        setCurrentUser(user);
         setAuthState("authenticated");
-        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]).catch((err) =>
+        const adminRequests = user.is_admin
+          ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+          : [];
+        Promise.all([refreshSessions(undefined, { quiet: true }), ...adminRequests]).catch((err) =>
           setError(getErrorMessage(err))
         );
       })
@@ -176,12 +197,15 @@ export function App() {
     if (authState !== "authenticated" || !autoRefresh) return;
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible" || busyRef.current) return;
-      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()])
+      const adminRequests = isAdmin
+        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        : [];
+      Promise.all([refreshSessions(session?.id, { quiet: true }), ...adminRequests])
         .then(() => setError(""))
         .catch((err) => setError(getErrorMessage(err)));
     }, AUTO_REFRESH_MS);
     return () => window.clearInterval(intervalId);
-  }, [authState, autoRefresh, session?.id]);
+  }, [authState, autoRefresh, isAdmin, session?.id]);
 
   useEffect(() => {
     if (!session) return;
@@ -233,6 +257,15 @@ export function App() {
     setOpsStatus(response);
   }
 
+  async function refreshRuntime() {
+    setRuntime(await getRuntime());
+  }
+
+  async function refreshUsers() {
+    const response = await listUsers();
+    setUsers(response.users);
+  }
+
   async function refreshLlmKeys() {
     const response = await listLlmKeys();
     setLlmKeyState(response);
@@ -251,16 +284,54 @@ export function App() {
     };
 
     await runAction("Validando acceso...", async () => {
-      const info = await validateLogin(credentials);
+      const { user } = await getCurrentUser(credentials);
       saveAuth(credentials);
-      setRuntime(info);
+      setCurrentUser(user);
       setAuthState("authenticated");
-      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
+      const adminRequests = user.is_admin
+        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        : [];
+      await Promise.all([refreshSessions(undefined, { quiet: true }), ...adminRequests]);
+    });
+  }
+
+  async function handleRegister(event: FormEvent) {
+    event.preventDefault();
+    const credentials: AuthCredentials = {
+      username: registerUsername.trim(),
+      password: registerPassword
+    };
+    await runAction("Creando tu cuenta...", async () => {
+      const { user } = await registerUser(
+        credentials.username,
+        registerDisplayName.trim(),
+        credentials.password
+      );
+      saveAuth(credentials);
+      setCurrentUser(user);
+      setLoginUser(credentials.username);
+      setRegisterPassword("");
+      setAuthState("authenticated");
+      await refreshSessions(undefined, { quiet: true });
+    });
+  }
+
+  async function handleCreateOwnedGroup(event: FormEvent) {
+    event.preventDefault();
+    const title = newOwnedGroupName.trim();
+    if (!title) return;
+    await runAction("Creando tu grupo...", async () => {
+      const response = await createSession(title);
+      setNewOwnedGroupName("");
+      setSession(response.session);
+      await refreshSessions(response.session.id);
     });
   }
 
   function handleLogout() {
     clearAuth();
+    setCurrentUser(null);
+    setUsers([]);
     setRuntime(null);
     setOpsStatus(null);
     setLlmKeyState(null);
@@ -273,8 +344,43 @@ export function App() {
 
   async function handleRefreshAll() {
     await runAction("Actualizando panel...", async () => {
-      const [info] = await Promise.all([getRuntime(), refreshSessions(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar()]);
-      setRuntime(info);
+      const adminRequests = isAdmin
+        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        : [];
+      await Promise.all([refreshSessions(), ...adminRequests]);
+    });
+  }
+
+  async function handleCreateUser(event: FormEvent) {
+    event.preventDefault();
+    await runAction("Creando usuario...", async () => {
+      await createUser(newUsername.trim(), newDisplayName.trim(), newPassword);
+      setNewUsername("");
+      setNewDisplayName("");
+      setNewPassword("");
+      await refreshUsers();
+    });
+  }
+
+  async function handleToggleSessionUser(username: string) {
+    if (!session) return;
+    const assigned = session.assigned_usernames.includes(username);
+    const next = assigned
+      ? session.assigned_usernames.filter((value) => value !== username)
+      : [...session.assigned_usernames, username];
+    await runAction("Actualizando acceso al grupo...", async () => {
+      const response = await assignSessionUsers(session.id, next);
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+    });
+  }
+
+  async function handleAssignChief(participantId: string) {
+    if (!session) return;
+    await runAction("Asignando jefe del grupo...", async () => {
+      const response = await assignSessionChief(session.id, participantId);
+      setSession(response.session);
+      await refreshSessions(response.session.id);
     });
   }
 
@@ -389,24 +495,6 @@ export function App() {
     const archived = Boolean(session.archived_at);
     await runAction(archived ? "Reabriendo sesion..." : "Archivando sesion...", async () => {
       const response = archived ? await reopenSession(session.id) : await archiveSession(session.id);
-      setSession(response.session);
-      await refreshSessions(response.session.id);
-    });
-  }
-
-  async function handleClaimOwner() {
-    if (!session) return;
-    await runAction("Actualizando dueno del grupo...", async () => {
-      const response = await configureChannel(session.id, { owner_admin: loginUser.trim() });
-      setSession(response.session);
-      await refreshSessions(response.session.id);
-    });
-  }
-
-  async function handleReleaseOwner() {
-    if (!session) return;
-    await runAction("Liberando grupo...", async () => {
-      const response = await configureChannel(session.id, { owner_admin: "" });
       setSession(response.session);
       await refreshSessions(response.session.id);
     });
@@ -531,19 +619,23 @@ export function App() {
           <div className="auth-intro">
             <div className="brand-line">
               <div className="brand-mark">C</div>
-              <span>Coordina WhatsApp</span>
+              <span>Coordina</span>
             </div>
-            <h1>Panel administrador</h1>
-            <p>Operacion privada del bot, grupos, sesiones e historial.</p>
+            <h1>{authMode === "login" ? "Acceso al panel" : "Crea tu cuenta"}</h1>
+            <p>
+              {authMode === "login"
+                ? "Administra tus propios grupos sin acceder a información de otras cuentas."
+                : "Tu cuenta será administradora únicamente de los grupos que tú crees."}
+            </p>
           </div>
 
-          <form className="login-form" onSubmit={handleLogin}>
+          {authMode === "login" ? <form className="login-form" onSubmit={handleLogin}>
             <label>
               Usuario
               <input autoComplete="username" value={loginUser} onChange={(event) => setLoginUser(event.target.value)} />
             </label>
             <label>
-              Contrasena
+              Contraseña
               <input
                 autoComplete="current-password"
                 type="password"
@@ -552,11 +644,36 @@ export function App() {
               />
             </label>
             <button type="submit" disabled={isBusy || !loginUser.trim() || !loginPassword}>
-              Entrar
+              Ingresar
             </button>
             {error ? <p className="form-error">{error}</p> : null}
             {busyLabel ? <p className="form-status">{busyLabel}</p> : null}
-          </form>
+            <button className="auth-switch" type="button" onClick={() => { setError(""); setAuthMode("register"); }}>
+              Crear una cuenta
+            </button>
+          </form> : <form className="login-form" onSubmit={handleRegister}>
+            <label>
+              Nombre
+              <input autoComplete="name" value={registerDisplayName} onChange={(event) => setRegisterDisplayName(event.target.value)} />
+            </label>
+            <label>
+              Usuario
+              <input autoComplete="username" value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} />
+            </label>
+            <label>
+              Contraseña
+              <input autoComplete="new-password" minLength={10} type="password" value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} />
+            </label>
+            <small>Mínimo 10 caracteres. Esta cuenta no tendrá permisos de plataforma.</small>
+            <button type="submit" disabled={isBusy || registerDisplayName.trim().length < 2 || registerUsername.trim().length < 2 || registerPassword.length < 10}>
+              Registrarme
+            </button>
+            {error ? <p className="form-error">{error}</p> : null}
+            {busyLabel ? <p className="form-status">{busyLabel}</p> : null}
+            <button className="auth-switch" type="button" onClick={() => { setError(""); setAuthMode("login"); }}>
+              Ya tengo una cuenta
+            </button>
+          </form>}
         </section>
       </main>
     );
@@ -568,19 +685,24 @@ export function App() {
         <div className="brand-line">
           <div className="brand-mark">C</div>
           <div>
-            <strong>Coordina WhatsApp</strong>
-            <span>{session ? sessionDisplayName(session) : "Panel operativo"}</span>
+            <strong>Coordina</strong>
+            <span>{session ? `${channelLabel(session)} · ${sessionDisplayName(session)}` : "Panel operativo"}</span>
           </div>
         </div>
         <div className="topbar-actions">
+          <span className="account-label">
+            {currentUser?.is_admin ? "Administrador de plataforma" : `Administrador de grupos · ${currentUser?.display_name}`}
+          </span>
           <span className="sync-label">{lastSyncedAt ? `Actualizado ${formatShortTime(lastSyncedAt)}` : "Sin sincronizar"}</span>
-          <label className="toggle-pill">
-            <input checked={autoRefresh} type="checkbox" onChange={(event) => setAutoRefresh(event.target.checked)} />
-            Auto
-          </label>
-          <a className="ghost-button" href={PUBLIC_APP_URL} target="_blank" rel="noreferrer">
-            Abrir sitio
-          </a>
+          {isAdmin ? <>
+            <label className="toggle-pill">
+              <input checked={autoRefresh} type="checkbox" onChange={(event) => setAutoRefresh(event.target.checked)} />
+              Auto
+            </label>
+            <a className="ghost-button" href={PUBLIC_APP_URL} target="_blank" rel="noreferrer">
+              Abrir sitio
+            </a>
+          </> : null}
           <button className="ghost-button" type="button" onClick={handleRefreshAll} disabled={isBusy}>
             Actualizar
           </button>
@@ -593,7 +715,7 @@ export function App() {
       {error ? <div className="notice error">{error}</div> : null}
       {busyLabel ? <div className="notice active">{busyLabel}</div> : null}
 
-      <section className="metrics-row" aria-label="Estado del sistema">
+      {isAdmin ? <section className="metrics-row" aria-label="Estado del sistema">
         <Metric
           label="Bot"
           value={botMetricValue}
@@ -609,30 +731,40 @@ export function App() {
         <Metric label="Abiertas" value={String(openSessionCount)} detail={`${archivedSessionCount} archivadas`} tone="ok" />
         <Metric label="Revision" value={String(reviewSessionCount)} detail={`${readySessionCount} listas`} tone={reviewSessionCount ? "warn" : "ok"} />
         <Metric label="Mensajes" value={String(latestMessageCount)} detail="sesion activa" tone="neutral" />
-        {isSuperadmin ? (
-          <>
-            <Metric
-              label="Backend"
-              value={runtime?.provider_label ?? "Revisando"}
-              detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_active_key_name ? `Activa: ${runtime.gemini_active_key_name}` : "Sin Gemini"}
-              tone={runtime?.warnings.length || (lastProcessing && lastProcessing.confidence !== "high") ? "warn" : "ok"}
-            />
-            <Metric label="Seguridad" value="HTTPS" detail="API protegida" tone="ok" />
-          </>
-        ) : null}
-      </section>
+        <Metric
+          label="Backend"
+          value={runtime?.provider_label ?? "Revisando"}
+          detail={lastProcessing ? `${lastProcessing.confidence_label} - ${lastProcessing.source}` : runtime?.gemini_active_key_name ? `Activa: ${runtime.gemini_active_key_name}` : "Sin Gemini"}
+          tone={runtime?.warnings.length || (lastProcessing && lastProcessing.confidence !== "high") ? "warn" : "ok"}
+        />
+        <Metric label="Seguridad" value="HTTPS" detail="API protegida" tone="ok" />
+      </section> : null}
 
       <section className="workspace">
         <aside className="panel sessions-panel">
           <div className="panel-head">
             <div>
-              <span>Sesiones</span>
+              <span>{isAdmin ? "Sesiones" : "Mis grupos"}</span>
               <strong>{visibleSessions.length}</strong>
             </div>
             <button className="icon-button" type="button" onClick={() => refreshSessions()} disabled={isBusy || sessionsLoading}>
               Sync
             </button>
           </div>
+
+          {!isAdmin ? <form className="owned-group-form" onSubmit={handleCreateOwnedGroup}>
+            <label>
+              Crear grupo
+              <input
+                placeholder="Ej. Equipo de proyecto"
+                value={newOwnedGroupName}
+                onChange={(event) => setNewOwnedGroupName(event.target.value)}
+              />
+            </label>
+            <button type="submit" disabled={isBusy || newOwnedGroupName.trim().length < 2}>
+              Nuevo grupo
+            </button>
+          </form> : null}
 
           <label className="search-box">
             Buscar
@@ -643,7 +775,7 @@ export function App() {
             />
           </label>
 
-          <div className="filter-row" role="tablist" aria-label="Filtrar sesiones">
+          {isAdmin ? <div className="filter-row" role="tablist" aria-label="Filtrar sesiones">
             <FilterButton active={sessionFilter === "all"} onClick={() => setSessionFilter("all")}>
               Abiertas <span>{openSessionCount}</span>
             </FilterButton>
@@ -662,16 +794,14 @@ export function App() {
             <FilterButton active={sessionFilter === "groups"} onClick={() => setSessionFilter("groups")}>
               Grupos <span>{realGroupCount}</span>
             </FilterButton>
-            {isSuperadmin ? (
-              <FilterButton active={sessionFilter === "manual"} onClick={() => setSessionFilter("manual")}>
-                Pruebas <span>{manualSessionCount}</span>
-              </FilterButton>
-            ) : null}
-          </div>
+            <FilterButton active={sessionFilter === "manual"} onClick={() => setSessionFilter("manual")}>
+              Pruebas <span>{manualSessionCount}</span>
+            </FilterButton>
+          </div> : <p className="normal-user-list-hint">Aquí aparecen únicamente los grupos que creaste o que te delegaron.</p>}
 
           <div className="session-list" aria-label="Sesiones disponibles">
             {sessionsLoading ? <div className="empty-state">Cargando sesiones...</div> : null}
-            {!sessionsLoading && !sessions.length ? <div className="empty-state">Sin sesiones registradas.</div> : null}
+            {!sessionsLoading && !sessions.length ? <div className="empty-state">{isAdmin ? "Sin sesiones registradas." : "Crea tu primer grupo para obtener el código de vinculación."}</div> : null}
             {!sessionsLoading && sessions.length > 0 && !visibleSessions.length ? (
               <div className="empty-state">No hay resultados para el filtro actual.</div>
             ) : null}
@@ -682,25 +812,16 @@ export function App() {
         </aside>
 
         <section className="panel detail-panel">
-          {session ? (
+          {session ? (isAdmin || ownsCurrentSession ? (
             <>
               <div className="detail-head">
                 <div>
-                  <span>{session.channel_config.group_jid ? "Grupo WhatsApp" : "Sesion manual"}</span>
+                  <span>{session.channel_config.group_jid ? `Grupo ${channelLabel(session)}` : "Sesion manual"}</span>
                   <h2>{sessionDisplayName(session)}</h2>
                   <p>{session.channel_config.group_jid ?? "Sesion creada desde panel o API"}</p>
                 </div>
                 <div className="detail-actions">
                   <div className={`status-badge ${session.status}`}>{getSessionQuality(session).label}</div>
-                  {session.channel_config.owner_admin ? (
-                    <button className="ghost-button compact" type="button" onClick={handleReleaseOwner} disabled={isBusy}>
-                      Liberar grupo
-                    </button>
-                  ) : (
-                    <button className="ghost-button compact" type="button" onClick={handleClaimOwner} disabled={isBusy}>
-                      Reclamar grupo
-                    </button>
-                  )}
                   <button className="ghost-button compact" type="button" onClick={handleToggleArchive} disabled={isBusy}>
                     {session.archived_at ? "Reabrir" : "Archivar"}
                   </button>
@@ -709,7 +830,6 @@ export function App() {
 
               <div className="facts-grid">
                 <Fact label="Calidad" value={getSessionQuality(session).label} />
-                <Fact label="Dueno" value={session.channel_config.owner_admin ?? "Sin asignar"} />
                 <Fact label="Integrantes actuales" value={String(session.channel_config.group_participant_count ?? "N/D")} />
                 <Fact label="Con disponibilidad" value={String(session.participants.length)} />
                 <Fact label="Revision vigente" value={`R${session.proposal_revision}`} />
@@ -979,30 +1099,147 @@ export function App() {
               ) : null}
             </>
           ) : (
+            <>
+              <div className="detail-head">
+                <div>
+                  <span>Grupo {channelLabel(session)}</span>
+                  <h2>{sessionDisplayName(session)}</h2>
+                  <p>Información y coordinación del grupo asignado.</p>
+                </div>
+                <div className={`status-badge ${session.status}`}>{getSessionQuality(session).label}</div>
+              </div>
+
+              <div className="facts-grid normal-facts">
+                <Fact label="Canal" value={channelLabel(session)} />
+                <Fact label="Integrantes" value={String(session.channel_config.group_participant_count ?? session.participants.length)} />
+                <Fact label="Jefe" value={chiefName(session) ?? "Sin asignar"} />
+                <Fact label="Mensajes" value={String(selectedHistory.length)} />
+              </div>
+
+              <div className="people-block">
+                <div className="section-title">
+                  <span>Integrantes</span>
+                  <small>Selecciona quién será jefe del grupo</small>
+                </div>
+                {session.participants.length ? <div className="people-list">
+                  {session.participants.map((participant) => {
+                    const selected = session.chief_participant_id === participant.id;
+                    return <article className={selected ? "person-row chief" : "person-row"} key={participant.id}>
+                      <div>
+                        <strong>{participant.name}</strong>
+                        <p>{formatSlots(participant.availability)}</p>
+                      </div>
+                      <button className={selected ? "ghost-button compact active-chief" : "ghost-button compact"} type="button" disabled={isBusy || selected} onClick={() => handleAssignChief(participant.id)}>
+                        {selected ? "Jefe asignado" : "Asignar jefe"}
+                      </button>
+                    </article>;
+                  })}
+                </div> : <div className="empty-state">Aún no hay integrantes detectados.</div>}
+              </div>
+
+              <div className="options-block">
+                <div className="section-title">
+                  <span>Horarios propuestos</span>
+                  <small>{session.options.length} opciones</small>
+                </div>
+                {session.options.length ? <div className="option-list">
+                  {session.options.map((option, index) => <article className="option-row" key={option.id}>
+                    <div>
+                      <strong>{index + 1}. {option.day} {option.start}-{option.end}</strong>
+                      <p>{option.coverage_percent}% · {option.available_participants.join(", ") || "sin asistentes"}</p>
+                    </div>
+                  </article>)}
+                </div> : <div className="empty-state">Todavía no hay horarios calculados.</div>}
+              </div>
+
+              <div className="history-block">
+                <div className="section-title">
+                  <span>Mensajes recientes</span>
+                  <small>Últimos {selectedHistory.length}</small>
+                </div>
+                {selectedHistory.length ? <div className="message-list">
+                  {selectedHistory.map((message) => <article className={`message-item ${message.kind}`} key={message.id}>
+                    <span>{message.sender} · {formatTimestamp(message.created_at)}</span>
+                    <p>{message.text}</p>
+                  </article>)}
+                </div> : <div className="empty-state">No hay mensajes registrados.</div>}
+              </div>
+            </>
+          )) : (
             <div className="empty-state">Selecciona una sesion.</div>
           )}
         </section>
 
         <aside className="side-stack">
-          {isSuperadmin ? (
-            <>
-              <GeminiKeyPanel
-                state={llmKeyState}
-                busy={isBusy}
-                onCreate={handleCreateLlmKey}
-                onUpdate={handleUpdateLlmKey}
-                onTest={handleTestLlmKey}
-                onDelete={handleDeleteLlmKey}
-              />
+          {!isAdmin && ownsCurrentSession && session ? <section className="panel link-group-panel">
+            <div className="panel-head">
+              <div>
+                <span>WhatsApp</span>
+                <strong>{session.channel_config.group_jid ? "Grupo vinculado" : "Vincular este grupo"}</strong>
+              </div>
+              <span className={session.channel_config.group_jid ? "status-dot online" : "status-dot pending"} />
+            </div>
+            <div className="bot-number">
+              <span>Número del bot</span>
+              <strong>{BOT_PHONE_DISPLAY}</strong>
+            </div>
+            {session.channel_config.group_jid ? <>
+              <p className="link-success">Conectado con {session.channel_config.group_name || "tu grupo de WhatsApp"}.</p>
+              <small>Los mensajes con @coordina llegarán solamente a este espacio.</small>
+            </> : <>
+              <ol className="link-steps">
+                <li>Crea el grupo en WhatsApp.</li>
+                <li>Agrega el número del bot.</li>
+                <li>Envía este comando dentro del grupo:</li>
+              </ol>
+              <code className="link-command">@coordina vincular {session.link_code}</code>
+              <button type="button" onClick={() => navigator.clipboard.writeText(`@coordina vincular ${session.link_code}`)}>
+                Copiar comando
+              </button>
+              <small>El código funciona una sola vez y vincula únicamente este grupo.</small>
+            </>}
+          </section> : null}
 
-              <GoogleCalendarPanel
-                state={googleCalendarState}
-                busy={isBusy}
-                onConnect={handleConnectGoogleCalendar}
-                onDisconnect={handleDisconnectGoogleCalendar}
-              />
-            </>
-          ) : null}
+          {isAdmin ? <section className="panel user-access-panel">
+            <div className="panel-head">
+              <div>
+                <span>Accesos</span>
+                <strong>Usuarios y grupos</strong>
+              </div>
+            </div>
+            <form className="form-grid user-create-form" onSubmit={handleCreateUser}>
+              <label>Usuario<input value={newUsername} placeholder="ej. daniel" onChange={(event) => setNewUsername(event.target.value)} /></label>
+              <label>Nombre visible<input value={newDisplayName} placeholder="Daniel Eguíluz" onChange={(event) => setNewDisplayName(event.target.value)} /></label>
+              <label>Contraseña<input type="password" minLength={10} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+              <button type="submit" disabled={isBusy || newUsername.trim().length < 2 || newDisplayName.trim().length < 2 || newPassword.length < 10}>Crear usuario</button>
+            </form>
+            <div className="access-list">
+              <span className="access-list-title">Acceso a {session ? sessionDisplayName(session) : "un grupo"}</span>
+              {users.filter((user) => !user.is_admin).map((user) => <label className="access-user" key={user.username}>
+                <input type="checkbox" checked={Boolean(session?.assigned_usernames.includes(user.username))} disabled={isBusy || !session} onChange={() => handleToggleSessionUser(user.username)} />
+                <span><strong>{user.display_name}</strong><small>@{user.username}</small></span>
+              </label>)}
+              {!users.some((user) => !user.is_admin) ? <div className="empty-state">Crea el primer usuario para asignarle este grupo.</div> : null}
+            </div>
+          </section> : null}
+
+          {isAdmin ? <>
+          <GeminiKeyPanel
+            state={llmKeyState}
+            busy={isBusy}
+            onCreate={handleCreateLlmKey}
+            onUpdate={handleUpdateLlmKey}
+            onTest={handleTestLlmKey}
+            onDelete={handleDeleteLlmKey}
+          />
+
+          <GoogleCalendarPanel
+            state={googleCalendarState}
+            busy={isBusy}
+            onConnect={handleConnectGoogleCalendar}
+            onDisconnect={handleDisconnectGoogleCalendar}
+          />
+          </> : null}
 
           <section className="panel">
             <div className="panel-head">
@@ -1049,6 +1286,7 @@ export function App() {
             )}
           </section>
 
+          {isAdmin || ownsCurrentSession ? <>
           <section className="panel">
             <div className="panel-head">
               <div>
@@ -1146,27 +1384,26 @@ export function App() {
             </div>
           </section>
 
-          {isSuperadmin ? (
-            <section className="panel">
-              <div className="panel-head">
-                <div>
-                  <span>Prueba</span>
-                  <strong>Canal simulado</strong>
+          <section className="panel">
+            <div className="panel-head">
+              <div>
+                <span>Prueba</span>
+                <strong>Canal simulado</strong>
+              </div>
+            </div>
+            <div className="mini-thread">
+              {CHANNEL_EXAMPLE.map((message) => (
+                <div className="mini-message" key={`${message.sender}-${message.text}`}>
+                  <span>{message.sender}</span>
+                  <p>{message.text}</p>
                 </div>
-              </div>
-              <div className="mini-thread">
-                {CHANNEL_EXAMPLE.map((message) => (
-                  <div className="mini-message" key={`${message.sender}-${message.text}`}>
-                    <span>{message.sender}</span>
-                    <p>{message.text}</p>
-                  </div>
-                ))}
-              </div>
-              <button type="button" onClick={handleRunDemo} disabled={isBusy}>
-                Ejecutar prueba
-              </button>
-            </section>
-          ) : null}
+              ))}
+            </div>
+            <button type="button" onClick={handleRunDemo} disabled={isBusy}>
+              Ejecutar prueba
+            </button>
+          </section>
+          </> : null}
         </aside>
       </section>
     </main>
@@ -1269,6 +1506,18 @@ function normalizeSearch(value: string) {
 
 function sessionDisplayName(session: Session) {
   return session.channel_config.group_name || session.title || "Sesion sin nombre";
+}
+
+function channelLabel(session: Session) {
+  const groupJid = session.channel_config.group_jid?.toLowerCase() ?? "";
+  if (!groupJid) return "Prueba";
+  if (groupJid.startsWith("slack:")) return "Slack";
+  if (groupJid.endsWith("@g.us")) return "WhatsApp";
+  return "Canal";
+}
+
+function chiefName(session: Session) {
+  return session.participants.find((participant) => participant.id === session.chief_participant_id)?.name ?? null;
 }
 
 function lastHumanMessage(session: Session) {
@@ -1394,7 +1643,7 @@ function SessionButton({
         <span className={`quality-chip ${quality.tone}`}>{quality.label}</span>
       </span>
       <span className="session-meta">
-        {item.channel_config.group_jid ? "Grupo" : "Prueba"} - {channelMessagesForCurrentContext(item).length} mensajes - {quality.detail}
+        {channelLabel(item)} - {channelMessagesForCurrentContext(item).length} mensajes - {quality.detail}
       </span>
       <span className="session-last">{lastHumanMessage(item) ?? "Sin historial del canal"}</span>
     </button>

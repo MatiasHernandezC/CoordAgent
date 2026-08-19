@@ -155,6 +155,11 @@ export type Session = {
   id: string;
   schema_version?: number;
   title: string;
+  owner_username: string | null;
+  link_code: string | null;
+  linked_at: string | null;
+  assigned_usernames: string[];
+  chief_participant_id: string | null;
   participants: Participant[];
   options: TimeOption[];
   availability_matrix: AvailabilityCell[];
@@ -177,6 +182,13 @@ export type Session = {
   status: "draft" | "calculated" | "confirmed";
   habitual_slot?: TimeSlot | null;
   habitual_history_index?: number | null;
+};
+
+export type AppUser = {
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  role: "platform_admin" | "group_admin";
 };
 
 export type RuntimeInfo = {

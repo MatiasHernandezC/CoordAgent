@@ -75,8 +75,8 @@ en la descripcion.
 
 - El `state` de la autorizacion es de un solo uso y expira a los 10 minutos
   — evita reusar un link de autorizacion capturado.
-- El callback de Google llega como redireccion del navegador del propio
-  administrador, que ya tiene Basic Auth cacheado para ese dominio.
+- El callback se protege con un `state` aleatorio, firmado y de un solo uso;
+  no depende de credenciales incluidas en la redireccion de Google.
 - Desconectar desde el panel borra el refresh token local; no revoca el
   acceso en Google. Para eso hay que ir a
   <https://myaccount.google.com/permissions> y quitarlo ahi.

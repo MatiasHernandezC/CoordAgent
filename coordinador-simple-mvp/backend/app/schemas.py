@@ -203,6 +203,19 @@ class Session(BaseModel):
     # Al tener default, las sesiones ya guardadas sin este campo siguen validando.
     schema_version: int = 1
     title: str
+    # La cuenta propietaria administra el grupo; el administrador de plataforma
+    # mantiene acceso global. Las sesiones históricas pueden no tener dueño.
+    owner_username: str | None = None
+    # Código temporal que el propietario escribe dentro del grupo de WhatsApp.
+    # Se elimina inmediatamente después de una vinculación correcta.
+    link_code: str | None = None
+    linked_at: str | None = None
+    # Una sesion puede estar asignada a varias cuentas. Los administradores
+    # conservan acceso global y los registros antiguos parten sin asignacion.
+    assigned_usernames: list[str] = Field(default_factory=list)
+    # Se guarda el ID estable del participante, no su nombre visible (puede
+    # cambiar o repetirse dentro del grupo).
+    chief_participant_id: str | None = None
     participants: list[Participant] = Field(default_factory=list)
     options: list[TimeOption] = Field(default_factory=list)
     availability_matrix: list[AvailabilityCell] = Field(default_factory=list)
@@ -241,6 +254,24 @@ class Session(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     title: str = "Reunion grupal"
+
+
+class CreatePanelUserRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=2, max_length=80)
+    password: str = Field(min_length=10, max_length=128)
+
+
+class RegisterPanelUserRequest(CreatePanelUserRequest):
+    pass
+
+
+class AssignSessionUsersRequest(BaseModel):
+    usernames: list[str] = Field(default_factory=list, max_length=100)
+
+
+class AssignChiefRequest(BaseModel):
+    participant_id: str = Field(min_length=1, max_length=80)
 
 
 class MessageRequest(BaseModel):
@@ -358,6 +389,11 @@ class ResolveChannelGroupRequest(BaseModel):
     group_participant_ids: list[str] = Field(default_factory=list)
     coordinator_ids: list[str] = Field(default_factory=list)
     trigger_word: str = Field(default="@coordina", min_length=2, max_length=40)
+    create_if_missing: bool = True
+
+
+class LinkChannelGroupRequest(ResolveChannelGroupRequest):
+    link_code: str = Field(min_length=8, max_length=32)
 
 
 class ChannelMessageRequest(BaseModel):

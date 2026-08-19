@@ -1,4 +1,4 @@
-import type { GoogleCalendarStatus, LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
+import type { AppUser, GoogleCalendarStatus, LlmKey, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session, TokenUsage } from "./types";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "coordina.basicAuth";
@@ -157,14 +157,50 @@ export function disconnectGoogleCalendar() {
   return request<{ disconnected: boolean }>("/api/admin/google-calendar/disconnect", { method: "POST" });
 }
 
-export function validateLogin(credentials: AuthCredentials) {
-  return request<RuntimeInfo>(
-    "/api/runtime",
+export function getCurrentUser(credentials?: AuthCredentials | null) {
+  return request<{ user: AppUser }>(
+    "/api/auth/me",
     {
       method: "GET"
     },
     credentials
   );
+}
+
+export function registerUser(username: string, displayName: string, password: string) {
+  return request<{ user: AppUser }>(
+    "/api/auth/register",
+    {
+      method: "POST",
+      body: JSON.stringify({ username, display_name: displayName, password })
+    },
+    null
+  );
+}
+
+export function listUsers() {
+  return request<{ users: AppUser[] }>("/api/auth/users", { method: "GET" });
+}
+
+export function createUser(username: string, displayName: string, password: string) {
+  return request<{ user: AppUser }>("/api/auth/users", {
+    method: "POST",
+    body: JSON.stringify({ username, display_name: displayName, password })
+  });
+}
+
+export function assignSessionUsers(sessionId: string, usernames: string[]) {
+  return request<{ session: Session }>(`/api/sessions/${sessionId}/access`, {
+    method: "PUT",
+    body: JSON.stringify({ usernames })
+  });
+}
+
+export function assignSessionChief(sessionId: string, participantId: string) {
+  return request<{ session: Session }>(`/api/sessions/${sessionId}/chief`, {
+    method: "PUT",
+    body: JSON.stringify({ participant_id: participantId })
+  });
 }
 
 export function sendMessage(sessionId: string, message: string) {
