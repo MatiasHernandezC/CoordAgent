@@ -99,6 +99,9 @@ services:
 
   gateway:
     build: ./gateway
+    ports:
+      # QR y estado disponibles solo desde este equipo; nunca por el tunel.
+      - "127.0.0.1:8082:8080"
     environment:
       BACKEND_URL: http://backend:8000
       GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:?define GATEWAY_API_TOKEN en .env.prod}
