@@ -5,6 +5,10 @@
 {$CADDY_SITE_ADDRESS::80} {
 	encode gzip
 
+	# Nunca entregar archivos de configuracion, secretos o metadata del repo.
+	@private_files path /.env /.env.* /.git /.git/* /docker-compose* /Caddyfile
+	respond @private_files 404
+
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
