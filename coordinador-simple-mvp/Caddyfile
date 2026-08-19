@@ -2,7 +2,7 @@
 # TLS automatico con Let's Encrypt cuando PUBLIC_DOMAIN es un dominio real.
 # Para pruebas locales sin dominio, PUBLIC_DOMAIN=localhost usa http en :80.
 
-{$PUBLIC_DOMAIN} {
+{$CADDY_SITE_ADDRESS::80} {
 	encode gzip
 
 	header {

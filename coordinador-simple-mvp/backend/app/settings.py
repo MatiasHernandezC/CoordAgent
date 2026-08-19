@@ -83,6 +83,15 @@ class Settings:
     panel_self_registration_enabled: bool = env_bool("PANEL_SELF_REGISTRATION_ENABLED", True)
     users_file: Path = Path(os.getenv("USERS_FILE", "data/users.json"))
 
+    # Proteccion basica para una instancia publica de demostracion. Se aplica
+    # por proceso; Cloudflare sigue siendo la primera barrera ante trafico hostil.
+    rate_limit_enabled: bool = env_bool("RATE_LIMIT_ENABLED", app_env == "production")
+    rate_limit_per_minute: int = env_int("RATE_LIMIT_PER_MINUTE", 120)
+    rate_limit_global_per_minute: int = env_int("RATE_LIMIT_GLOBAL_PER_MINUTE", 600)
+    rate_limit_auth_per_minute: int = env_int("RATE_LIMIT_AUTH_PER_MINUTE", 20)
+    rate_limit_register_per_hour: int = env_int("RATE_LIMIT_REGISTER_PER_HOUR", 5)
+    max_request_body_bytes: int = env_int("MAX_REQUEST_BODY_BYTES", 1_000_000)
+
     # Secreto compartido exclusivamente dentro de la red Docker para que el
     # gateway de WhatsApp pueda sincronizar grupos sin usar una cuenta humana.
     gateway_api_token: str = os.getenv("GATEWAY_API_TOKEN", "")

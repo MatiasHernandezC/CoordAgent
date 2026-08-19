@@ -12,6 +12,7 @@ from app.bff.slack_routes import router as slack_router
 from app.settings import settings
 from app.services.session_service import session_service
 from app.services.auth_service import AuthUser, authenticate_request
+from app.security import request_limiter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("app")
@@ -25,6 +26,59 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _client_key(request: Request) -> str:
+    # Cloudflare establece CF-Connecting-IP. X-Forwarded-For queda como
+    # compatibilidad para Caddy local y se acota para evitar claves enormes.
+    raw = request.headers.get("CF-Connecting-IP", "").strip()
+    if not raw:
+        raw = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+    if not raw and request.client:
+        raw = request.client.host
+    return (raw or "unknown")[:64]
+
+
+def _rate_denied(retry_after: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Demasiadas solicitudes. Intenta nuevamente en unos segundos."},
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+@app.middleware("http")
+async def basic_public_protection(request: Request, call_next):
+    if not settings.rate_limit_enabled:
+        return await call_next(request)
+
+    path = request.url.path.rstrip("/") or "/"
+    if path in {"/health", "/ready"}:
+        return await call_next(request)
+
+    content_length = request.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > settings.max_request_body_bytes:
+                return JSONResponse(status_code=413, content={"detail": "Solicitud demasiado grande."})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Content-Length invalido."})
+
+    client = _client_key(request)
+    checks = [
+        ("global:minute", settings.rate_limit_global_per_minute, 60),
+        (f"client:{client}:minute", settings.rate_limit_per_minute, 60),
+    ]
+    if path.startswith("/api/auth/"):
+        checks.append((f"auth:{client}:minute", settings.rate_limit_auth_per_minute, 60))
+    if path == "/api/auth/register":
+        checks.append((f"register:{client}:hour", settings.rate_limit_register_per_hour, 3600))
+
+    for key, limit, window in checks:
+        allowed, retry_after = request_limiter.allow(key, limit, window)
+        if not allowed:
+            return _rate_denied(retry_after)
+    return await call_next(request)
 
 
 def _is_gateway_route(path: str) -> bool:

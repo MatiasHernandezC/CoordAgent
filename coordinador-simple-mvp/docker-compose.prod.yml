@@ -38,6 +38,12 @@ services:
       PANEL_ADMIN_DISPLAY_NAME: ${PANEL_ADMIN_DISPLAY_NAME:-Administrador}
       PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:?define PANEL_ADMIN_PASSWORD en .env.prod}
       PANEL_SELF_REGISTRATION_ENABLED: ${PANEL_SELF_REGISTRATION_ENABLED:-true}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      RATE_LIMIT_GLOBAL_PER_MINUTE: ${RATE_LIMIT_GLOBAL_PER_MINUTE:-600}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-20}
+      RATE_LIMIT_REGISTER_PER_HOUR: ${RATE_LIMIT_REGISTER_PER_HOUR:-5}
+      MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-1000000}
       GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:?define GATEWAY_API_TOKEN en .env.prod}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
       GEMINI_MODEL_FALLBACK: ${GEMINI_MODEL_FALLBACK:-gemini-flash-lite-latest}
@@ -66,7 +72,10 @@ services:
       retries: 3
       start_period: 30s
     logging: *default-logging
-    restart: unless-stopped
+    restart: on-failure:5
+    init: true
+    security_opt:
+      - no-new-privileges:true
     # Sin "ports": Caddy lo publica bajo /api.
 
   frontend:
@@ -83,7 +92,9 @@ services:
       retries: 3
       start_period: 15s
     logging: *default-logging
-    restart: unless-stopped
+    restart: on-failure:5
+    security_opt:
+      - no-new-privileges:true
     # Sin "ports": Caddy lo publica en la raiz.
 
   gateway:
@@ -124,7 +135,10 @@ services:
       retries: 5
       start_period: 90s
     logging: *default-logging
-    restart: unless-stopped
+    restart: on-failure:5
+    init: true
+    security_opt:
+      - no-new-privileges:true
     # tty para poder leer el QR con: docker compose -f docker-compose.prod.yml logs -f gateway
     stdin_open: true
     tty: true
@@ -132,10 +146,10 @@ services:
   caddy:
     image: caddy:2
     ports:
-      - "80:80"
-      - "443:443"
+      # Solo localhost: Cloudflare Tunnel es la unica entrada publica.
+      - "127.0.0.1:8080:80"
     environment:
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+      CADDY_SITE_ADDRESS: ":80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -152,7 +166,9 @@ services:
       retries: 3
       start_period: 15s
     logging: *default-logging
-    restart: unless-stopped
+    restart: on-failure:5
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   pgdata:
