@@ -107,7 +107,6 @@ export type ChannelConfig = {
   group_participant_count: number | null;
   group_participant_ids: string[];
   coordinator_ids: string[];
-  owner_admin: string | null;
 };
 
 export type ChannelMessage = {
@@ -203,8 +202,6 @@ export type RuntimeInfo = {
   gemini_active_key_name: string | null;
   gemini_key_management_enabled: boolean;
   warnings: string[];
-  actor: string;
-  is_superadmin: boolean;
 };
 
 export type LlmKeyStatus = "unverified" | "ready" | "cooldown" | "invalid" | "incompatible" | "disabled";

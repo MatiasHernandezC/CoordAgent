@@ -577,7 +577,7 @@ class SessionService:
                 option=option.model_copy(deep=True),
                 summary=session.decision_summary,
                 confirmed_by=confirmed_by.strip() or "admin",
-                source=source if source in {"panel", "whatsapp", "slack", "api"} else "api",
+                source=source if source in {"panel", "whatsapp", "api"} else "api",
                 event_date=session.selected_event_date,
                 calendar_event=snapshot.model_copy(deep=True),
                 external_id=external_id,
@@ -666,9 +666,6 @@ class SessionService:
         group_participant_count: int | None = None,
         group_participant_ids: list[str] | None = None,
         coordinator_ids: list[str] | None = None,
-        owner_admin: str | None = None,
-        actor: str | None = None,
-        is_superadmin: bool = False,
     ) -> Session:
         session = self.get(session_id)
         previous_window = (
@@ -711,16 +708,6 @@ class SessionService:
             session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
         if coordinator_ids is not None:
             session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
-        if owner_admin is not None:
-            current_owner = session.channel_config.owner_admin
-            next_owner = owner_admin.strip() or None
-            self_release = current_owner == actor and next_owner is None
-            if current_owner and current_owner != next_owner and not is_superadmin and not self_release:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Este grupo ya tiene un administrador asignado; solo un superadmin puede reasignarlo.",
-                )
-            session.channel_config.owner_admin = next_owner
         roster_changed = previous_roster != (
             session.channel_config.group_participant_count,
             tuple(sorted(session.channel_config.group_participant_ids)),

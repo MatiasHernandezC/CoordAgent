@@ -72,8 +72,7 @@ logger = logging.getLogger("app.routes")
 
 
 @router.get("/runtime", response_model=RuntimeInfo)
-def runtime_info(request: Request):
-    actor = require_admin_actor(request)
+def runtime_info():
     model_by_provider = {
         "local": settings.local_llm_model,
         "gemini": settings.gemini_model,
@@ -101,8 +100,6 @@ def runtime_info(request: Request):
         gemini_active_key_name=active_key["name"] if active_key else None,
         gemini_key_management_enabled=key_state["management_enabled"],
         warnings=warnings,
-        actor=actor,
-        is_superadmin=is_superadmin_actor(actor),
     )
 
 
@@ -246,19 +243,7 @@ def link_channel_group(payload: LinkChannelGroupRequest):
 def list_sessions(request: Request):
     user = current_user(request)
     sessions = session_service.list_sessions()
-    legacy_header = request.headers.get("X-Coordina-Admin")
-    if legacy_header:
-        legacy_actor = require_admin_actor(request)
-    else:
-        legacy_actor = ""
-    if legacy_header and not is_superadmin_actor(legacy_actor):
-        sessions = [
-            session
-            for session in sessions
-            if not session.channel_config.owner_admin
-            or session.channel_config.owner_admin == legacy_actor
-        ]
-    elif not user.is_admin:
+    if not user.is_admin:
         sessions = [
             session
             for session in sessions
@@ -274,9 +259,6 @@ def list_sessions(request: Request):
 @router.get("/sessions/{session_id}")
 def get_session(session_id: str, request: Request):
     session = session_service.get(session_id)
-    if request.headers.get("X-Coordina-Admin"):
-        require_group_access(request, session)
-        return {"session": session}
     user = current_user(request)
     return {
         "session": session
@@ -401,16 +383,14 @@ def cancel_decision(session_id: str):
 
 
 @router.post("/sessions/{session_id}/archive")
-def archive_session(session_id: str, request: Request):
+def archive_session(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.archive(session_id)}
 
 
 @router.post("/sessions/{session_id}/reopen")
-def reopen_session(session_id: str, request: Request):
+def reopen_session(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.reopen(session_id)}
 
 
@@ -454,8 +434,6 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest, request: R
         if any(value is not None for value in advanced_fields) or (payload.trigger_word is not None and not is_owner):
             raise HTTPException(status_code=403, detail="La identidad del canal solo puede actualizarla el gateway.")
     with session_service.session_lock(session_id):
-        current = session_service.get(session_id)
-        actor = require_group_access(request, current)
         session = session_service.configure_channel(
             session_id,
             payload.listening_enabled,
@@ -468,9 +446,6 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest, request: R
             payload.group_participant_count,
             payload.group_participant_ids,
             payload.coordinator_ids,
-            payload.owner_admin,
-            actor,
-            is_superadmin_actor(actor),
         )
         return {
             "session": session
@@ -656,87 +631,6 @@ def invoke_channel_if_needed(
         token_usage=token_usage,
         duplicate=duplicate,
     )
-
-
-def execute_confirm_command(
-    session_id: str,
-    session,
-    *,
-    option_index: int | None = None,
-    option_id: str | None = None,
-    option_label: str | int | None = None,
-    confirmed_by: str,
-    source: str,
-    external_id: str | None,
-    expected_revision: int | None,
-) -> tuple:
-    """Confirma una opcion desde Slack o desde otro canal interactivo."""
-    session = session_service.calculate(session_id)
-    if expected_revision is None:
-        expected_revision = session.proposal_revision
-
-    blockers = confirmation_blockers(session)
-    if blockers:
-        reply = (
-            "*Coordina*\n\n"
-            "No puedo confirmar todavia:\n"
-            + "\n".join(f"- {item}" for item in blockers)
-            + "\n\n"
-            + build_channel_reply(session)
-        )
-        return session, reply, None, None, None
-
-    if expected_revision != session.proposal_revision:
-        reply = (
-            "*Coordina*\n\n"
-            f"La propuesta cambio: recibí R{expected_revision} y la actual es "
-            f"R{session.proposal_revision}. Estas son las opciones vigentes:\n\n"
-            + build_channel_reply(session)
-        )
-        return session, reply, None, None, None
-
-    option = None
-    if option_id is not None:
-        option = next((item for item in session.options if item.id == option_id), None)
-    elif option_index is not None and 1 <= option_index <= len(session.options):
-        option = session.options[option_index - 1]
-
-    if option is None:
-        label = option_label if option_label is not None else option_index
-        reply = (
-            "*Coordina*\n\n"
-            f"No encuentro la opcion {label}. Pide *@coordina* para ver las opciones actuales."
-        )
-        return session, reply, None, None, None
-
-    try:
-        session = session_service.confirm(
-            session_id,
-            option.id,
-            confirmed_by=confirmed_by,
-            source=source,
-            external_id=external_id,
-            expected_proposal_revision=expected_revision,
-        )
-    except HTTPException as error:
-        reply = f"*Coordina*\n\nNo puedo confirmar todavia. {error.detail}"
-        return session, reply, None, None, None
-
-    session = maybe_attach_google_calendar_event(session_id, session)
-    reply = build_confirmed_channel_reply(session)
-    document = document_name = document_mimetype = None
-    try:
-        ics_text = build_calendar_ics(session)
-        document = base64.b64encode(ics_text.encode("utf-8")).decode("ascii")
-        safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
-        document_name = f"{safe_name}-evento.ics"
-        document_mimetype = "text/calendar"
-    except Exception:
-        document = None
-        document_name = None
-        document_mimetype = None
-
-    return session, reply, document, document_name, document_mimetype
 
 
 def invoke_channel_command_if_needed(
@@ -1217,23 +1111,6 @@ def require_admin_actor(request: Request) -> str:
             detail="Esta operacion requiere autenticacion administrativa.",
         )
     return actor or "local-admin"
-
-
-def is_superadmin_actor(actor: str) -> bool:
-    return actor in settings.superadmin_users
-
-
-def require_group_access(request: Request, session) -> str:
-    user = getattr(request.state, "auth_user", None)
-    if user and user.username != "local-admin":
-        if user.is_admin or session.owner_username == user.username:
-            return user.username
-        raise HTTPException(status_code=403, detail="No tienes acceso a este grupo.")
-    actor = require_admin_actor(request)
-    owner = session.channel_config.owner_admin
-    if owner and not is_superadmin_actor(actor) and actor != owner:
-        raise HTTPException(status_code=403, detail="No tienes acceso a este grupo.")
-    return actor
 
 
 def session_for_user(session):

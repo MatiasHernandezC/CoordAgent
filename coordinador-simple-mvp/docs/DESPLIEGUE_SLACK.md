@@ -60,25 +60,7 @@ pruebas.
 En produccion, `/api/channels/slack/events` no usa una cuenta del panel: la
 autenticacion real es la firma `X-Slack-Signature`, verificada en cada request.
 
-## 4. Botones para confirmar (Interactivity & Shortcuts)
-
-Ademas de escribir `@coordina confirmar N`, el canal de Slack muestra un
-boton por cada opcion propuesta. Para activarlos:
-
-1. En el Slack App, **Interactivity & Shortcuts -> Activar**.
-2. **Request URL**: `https://TU_DOMINIO/api/channels/slack/interactions`.
-   No hace falta un evento aparte: Slack manda el click aca directo (payload
-   `block_actions`, verificado con la misma firma `X-Slack-Signature`).
-3. Guarda. Si pide reinstalar el app, hazlo (igual que con Events API).
-
-Al tocar un boton, el mensaje original se reemplaza en el mismo lugar con la
-confirmacion (no queda un mensaje duplicado). El `.ics` se sube aparte, igual
-que con `@coordina confirmar` por texto.
-
-En produccion, Caddy tambien deja `/api/channels/slack/interactions` sin
-Basic Auth por el mismo motivo que `/events` (ver `Caddyfile`).
-
-## 5. Probar
+## 4. Probar
 
 En el canal donde invitaste al bot:
 
@@ -87,13 +69,12 @@ Camila puede lunes en la tarde
 @coordina
 ```
 
-Responde con las opciones (texto + botones), mismo formato que WhatsApp. Para
-confirmar: `@coordina confirmar` o tocando el boton de la opcion.
+Responde con las opciones, mismo formato que WhatsApp. Para confirmar:
+`@coordina confirmar`.
 
 Si algo falla, mira los logs del backend (`slack_event_processing_failed`,
-`slack_delivery_failed`, `slack_block_action_failed`). El handler nunca
-revienta el webhook — Slack siempre recibe `200 OK` y el error queda solo en
-el log.
+`slack_delivery_failed`). El handler nunca revienta el webhook — Slack
+siempre recibe `200 OK` y el error queda solo en el log.
 
 ## Limitaciones (MVP)
 

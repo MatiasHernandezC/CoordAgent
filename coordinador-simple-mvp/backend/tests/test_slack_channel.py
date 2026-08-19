@@ -10,7 +10,6 @@ import hashlib
 import hmac
 import json
 import time
-from urllib.parse import urlencode
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +18,6 @@ import app.bff.slack_routes as slack_routes
 import app.services.session_service as session_module
 import app.services.slack_channel as slack_channel
 from app.main import app
-from app.schemas import Session
 from app.services.llm_service import llm_service
 from app.services.slack_channel import SlackApiError, upload_file, verify_slack_signature
 from app.settings import settings
@@ -61,57 +59,6 @@ def _post_event(client, payload: dict, *, retry_num: str | None = None, bad_sign
     if retry_num:
         headers["X-Slack-Retry-Num"] = retry_num
     return client.post("/api/channels/slack/events", content=body, headers=headers)
-
-
-def _post_interaction(client, payload: dict, *, bad_signature: bool = False):
-    # Slack firma el body form-encoded tal cual lo manda, no el JSON decodificado.
-    body = urlencode({"payload": json.dumps(payload)}).encode("utf-8")
-    timestamp = str(int(time.time()))
-    signature = "v0=invalid" if bad_signature else _sign(body, timestamp)
-    headers = {
-        "X-Slack-Request-Timestamp": timestamp,
-        "X-Slack-Signature": signature,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    return client.post("/api/channels/slack/interactions", content=body, headers=headers)
-
-
-def _prepare_slack_group_with_options(client) -> tuple[str, dict]:
-    """Sesion con options calculadas, identificada como grupo de Slack
-    (group_jid con prefijo slack:) para que confirm() audite source='slack'."""
-    created = client.post("/api/sessions", json={"title": "Grupo Slack"})
-    session_id = created.json()["session"]["id"]
-    configured = client.patch(
-        f"/api/sessions/{session_id}/channel/config",
-        json={"group_jid": "slack:C123", "group_name": "#equipo", "reply_format": "text"},
-    )
-    assert configured.status_code == 200
-    for name in ("Ana", "Beto"):
-        client.post(f"/api/sessions/{session_id}/participants", json={"name": name})
-        client.post(
-            f"/api/sessions/{session_id}/availability",
-            json={"participant_name": name, "day": "lunes", "start": "10:00", "end": "11:00"},
-        )
-    calculated = client.post(f"/api/sessions/{session_id}/calculate")
-    session = calculated.json()["session"]
-    assert session["options"], "se esperaban opciones calculadas para el test"
-    return session_id, session
-
-
-def _block_action_payload(session_id: str, option_id: str, revision: int, *, channel="C123", user="U1"):
-    return {
-        "type": "block_actions",
-        "channel": {"id": channel},
-        "user": {"id": user},
-        "response_url": "https://hooks.slack.test/actions/response",
-        "actions": [
-            {
-                "action_id": f"confirm_option:{option_id}",
-                "action_ts": "1700000003.000100",
-                "value": json.dumps({"sid": session_id, "oid": option_id, "rev": revision}),
-            }
-        ],
-    }
 
 
 # --- Firma -------------------------------------------------------------------
@@ -194,7 +141,7 @@ def test_slack_events_full_flow_creates_session_and_replies(client, monkeypatch)
     sent = []
     monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
     monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#equipo")
-    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: sent.append((channel, text)))
+    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text: sent.append((channel, text)))
     monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: sent.append(("upload", a, k)))
 
     response = _post_event(
@@ -228,7 +175,7 @@ def test_slack_events_duplicate_ts_is_idempotent(client, monkeypatch):
     sent = []
     monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
     monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#equipo")
-    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: sent.append((channel, text)))
+    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text: sent.append((channel, text)))
     monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: sent.append(("upload", a, k)))
 
     event = {
@@ -298,7 +245,7 @@ def test_slack_events_invokes_on_real_bot_mention(client, monkeypatch):
     sent = []
     monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
     monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#equipo")
-    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: sent.append((channel, text)))
+    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text: sent.append((channel, text)))
     monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: sent.append(("upload", a, k)))
 
     client.post(
@@ -393,99 +340,3 @@ def test_upload_file_raises_when_get_upload_url_fails(monkeypatch):
     )
     with pytest.raises(SlackApiError):
         upload_file("C123", "evento.ics", b"data")
-
-
-# --- _deliver adjunta botones cuando hay opciones vigentes -------------------
-
-def test_deliver_attaches_confirm_option_blocks(client, monkeypatch):
-    session_id, session_dict = _prepare_slack_group_with_options(client)
-    session = Session.model_validate(session_dict)
-
-    sent = []
-    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: sent.append((channel, text, blocks)))
-
-    class _FakeResult:
-        session = None
-        agent_reply = "Coordina: elige una opcion"
-        agent_reply_image = None
-        agent_reply_document = None
-
-    result = _FakeResult()
-    result.session = session
-    slack_routes._deliver("C123", result)
-
-    assert len(sent) == 1
-    _channel, _text, blocks = sent[0]
-    assert blocks is not None
-    values = [json.loads(el["value"]) for el in blocks[0]["elements"]]
-    assert values[0] == {"sid": session_id, "oid": session_dict["options"][0]["id"], "rev": session_dict["proposal_revision"]}
-
-
-# --- Interactivity: click en boton de Block Kit -------------------------------
-
-def test_block_action_bad_signature_rejected(client):
-    response = _post_interaction(client, {"type": "block_actions"}, bad_signature=True)
-    assert response.status_code == 401
-
-
-def test_block_action_confirms_option_and_replaces_message(client, monkeypatch):
-    session_id, session = _prepare_slack_group_with_options(client)
-    option_id = session["options"][0]["id"]
-    revision = session["proposal_revision"]
-
-    responded = []
-    uploaded = []
-    monkeypatch.setattr(slack_routes, "respond_to_url", lambda url, text, **k: responded.append((url, text)))
-    monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
-    monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: uploaded.append((a, k)))
-
-    response = _post_interaction(client, _block_action_payload(session_id, option_id, revision))
-    assert response.status_code == 200
-    assert uploaded, "se esperaba que el .ics se subiera tras confirmar"
-    assert len(responded) == 1
-    url, text = responded[0]
-    assert url == "https://hooks.slack.test/actions/response"
-    assert "Coordina" in text
-
-    confirmed = client.get(f"/api/sessions/{session_id}").json()["session"]
-    assert confirmed["status"] == "confirmed"
-    assert confirmed["selected_option"]["id"] == option_id
-    assert confirmed["decision_history"][-1]["source"] == "slack"
-
-
-def test_block_action_rejects_stale_revision(client, monkeypatch):
-    session_id, session = _prepare_slack_group_with_options(client)
-    option_id = session["options"][0]["id"]
-    stale_revision = session["proposal_revision"] - 1 or 999
-
-    responded = []
-    monkeypatch.setattr(slack_routes, "respond_to_url", lambda url, text, **k: responded.append((url, text)))
-    monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
-
-    response = _post_interaction(client, _block_action_payload(session_id, option_id, stale_revision))
-    assert response.status_code == 200
-    assert len(responded) == 1
-    assert "propuesta cambio" in responded[0][1]
-
-    still_open = client.get(f"/api/sessions/{session_id}").json()["session"]
-    assert still_open["status"] != "confirmed"
-
-
-def test_block_action_duplicate_click_is_idempotent(client, monkeypatch):
-    session_id, session = _prepare_slack_group_with_options(client)
-    option_id = session["options"][0]["id"]
-    revision = session["proposal_revision"]
-
-    responded = []
-    monkeypatch.setattr(slack_routes, "respond_to_url", lambda url, text, **k: responded.append((url, text)))
-    monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
-    monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: None)
-
-    payload = _block_action_payload(session_id, option_id, revision)
-    first = _post_interaction(client, payload)
-    second = _post_interaction(client, payload)
-    assert first.status_code == 200
-    assert second.status_code == 200
-
-    confirmed = client.get(f"/api/sessions/{session_id}").json()["session"]
-    assert len(confirmed["decision_history"]) == 1
