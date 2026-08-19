@@ -19,6 +19,7 @@ from app.services.slack_channel import (
     SlackConfigError,
     channel_group_jid,
     post_message,
+    resolve_channel_roster,
     resolve_bot_user_id,
     resolve_channel_name,
     resolve_display_name,
@@ -116,7 +117,11 @@ def _normalize_bot_mention(text: str, bot_user_id: str | None) -> str:
 
 
 def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
-    if event.get("type") != "message" or event.get("bot_id") or event.get("subtype"):
+    event_type = event.get("type")
+    if event_type == "member_joined_channel":
+        _sync_joined_channel(event.get("channel", ""), bot_user_id)
+        return
+    if event_type != "message" or event.get("bot_id") or event.get("subtype"):
         return
     if event.get("channel_type") == "im":
         return
@@ -131,15 +136,17 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
         return
 
     try:
+        roster = resolve_channel_roster(channel_id, bot_user_id)
         with session_service.group_lock(channel_group_jid(channel_id)):
             session = session_service.resolve_channel_group(
                 channel_group_jid(channel_id),
                 resolve_channel_name(channel_id),
-                None,
-                [],
-                [],
+                (roster or {}).get("participant_count"),
+                (roster or {}).get("participant_ids", []),
+                (roster or {}).get("coordinator_ids", []),
                 settings.slack_trigger_word,
                 channel_label="Slack",
+                participant_roster=(roster or {}).get("participant_roster"),
             )
 
         sender = resolve_display_name(user_id)
@@ -170,6 +177,29 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
         _deliver(channel_id, result)
     except Exception:  # nunca debe tumbar el handler del webhook
         logger.exception("slack_event_processing_failed channel=%s ts=%s", channel_id, ts)
+
+
+def _sync_joined_channel(channel_id: str, bot_user_id: str | None) -> None:
+    if not channel_id:
+        return
+    try:
+        roster = resolve_channel_roster(channel_id, bot_user_id)
+        if not roster:
+            return
+        with session_service.group_lock(channel_group_jid(channel_id)):
+            session_service.resolve_channel_group(
+                channel_group_jid(channel_id),
+                resolve_channel_name(channel_id),
+                roster["participant_count"],
+                roster["participant_ids"],
+                roster["coordinator_ids"],
+                settings.slack_trigger_word,
+                channel_label="Slack",
+                participant_roster=roster["participant_roster"],
+            )
+        logger.info("slack_channel_roster_synced channel=%s participants=%s", channel_id, roster["participant_count"])
+    except Exception:
+        logger.exception("slack_joined_channel_sync_failed channel=%s", channel_id)
 
 
 def _deliver(channel_id: str, result) -> None:

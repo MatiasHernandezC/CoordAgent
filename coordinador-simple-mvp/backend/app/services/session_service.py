@@ -17,6 +17,7 @@ from app.schemas import (
     DecisionRecord,
     ExtractedAvailability,
     Participant,
+    ParticipantRosterEntry,
     ProcessingSummary,
     Session,
     TimeOption,
@@ -157,6 +158,7 @@ class SessionService:
         trigger_word: str,
         channel_label: str = "WhatsApp",
         create_if_missing: bool = True,
+        participant_roster: list[ParticipantRosterEntry] | None = None,
     ) -> Session:
         """Create-or-get atomico por JID; un retry nunca crea otra sesion."""
         clean_jid = group_jid.strip()
@@ -186,7 +188,12 @@ class SessionService:
                     current.channel_config.group_participant_ids = unique_ids(group_participant_ids)
                     current.channel_config.coordinator_ids = unique_ids(coordinator_ids)
                     current.title = f"{channel_label} - {clean_name}"
-                    if previous_roster != (
+                    roster_hydrated = hydrate_participant_roster(
+                        current,
+                        participant_roster,
+                        current.channel_config.group_participant_ids,
+                    )
+                    if roster_hydrated or previous_roster != (
                         current.channel_config.group_participant_count,
                         tuple(current.channel_config.group_participant_ids),
                     ):
@@ -217,6 +224,8 @@ class SessionService:
                 )
             ],
         )
+        hydrate_participant_roster(session, participant_roster, session.channel_config.group_participant_ids)
+        refresh_schedule_state(session)
         return repository.save(session)
 
     def link_channel_group(
@@ -228,6 +237,7 @@ class SessionService:
         group_participant_ids: list[str],
         coordinator_ids: list[str],
         trigger_word: str,
+        participant_roster: list[ParticipantRosterEntry] | None = None,
     ) -> Session:
         clean_code = re.sub(r"[^A-Z0-9]", "", link_code.upper())
         clean_jid = group_jid.strip()
@@ -266,6 +276,8 @@ class SessionService:
             session.channel_config.group_participant_count = group_participant_count
             session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
             session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
+            hydrate_participant_roster(session, participant_roster, session.channel_config.group_participant_ids)
+            refresh_schedule_state(session)
             session.title = f"WhatsApp - {session.channel_config.group_name}"
             session.linked_at = datetime.now(timezone.utc).isoformat()
             session.link_code = None
@@ -666,6 +678,7 @@ class SessionService:
         group_participant_count: int | None = None,
         group_participant_ids: list[str] | None = None,
         coordinator_ids: list[str] | None = None,
+        participant_roster: list[ParticipantRosterEntry] | None = None,
     ) -> Session:
         session = self.get(session_id)
         previous_window = (
@@ -708,11 +721,18 @@ class SessionService:
             session.channel_config.group_participant_ids = sorted(unique_ids(group_participant_ids))
         if coordinator_ids is not None:
             session.channel_config.coordinator_ids = sorted(unique_ids(coordinator_ids))
+        roster_hydrated = False
+        if participant_roster is not None or group_participant_ids is not None:
+            roster_hydrated = hydrate_participant_roster(
+                session,
+                participant_roster,
+                session.channel_config.group_participant_ids,
+            )
         roster_changed = previous_roster != (
             session.channel_config.group_participant_count,
             tuple(sorted(session.channel_config.group_participant_ids)),
         )
-        if previous_window != (next_start, next_end) or roster_changed:
+        if previous_window != (next_start, next_end) or roster_changed or roster_hydrated:
             refresh_schedule_state(session)
         session.messages.append(
             ChatMessage(
@@ -1319,6 +1339,76 @@ def merge_participant_identity(participant: Participant, values: list[str] | set
     identities = unique_ids([*participant_identity_ids(participant), *list(values)])
     participant.external_ids = identities
     participant.external_id = canonical_external_id(identities)
+
+
+def roster_name_for_external_id(external_id: str) -> str:
+    clean_id = clean_external_id(external_id) or ""
+    local_part = clean_id.split("@", 1)[0].split(":", 1)[0]
+    if clean_id.endswith("@s.whatsapp.net") and local_part.isdigit():
+        return f"+{local_part}"
+    suffix = local_part[-8:] or "nuevo"
+    return f"Participante {suffix}"
+
+
+def is_roster_placeholder_name(name: str) -> bool:
+    clean_name = name.strip()
+    return (
+        is_generated_contact_name(clean_name)
+        or clean_name.startswith("+")
+        or clean_name.lower().startswith("participante ")
+    )
+
+
+def hydrate_participant_roster(
+    session: Session,
+    participant_roster: list[ParticipantRosterEntry] | None,
+    participant_ids: list[str] | None,
+) -> bool:
+    """Crea el padron del grupo antes de que llegue el primer mensaje."""
+    if participant_roster is None and participant_ids is None:
+        return False
+
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in participant_roster or []:
+        external_id = clean_external_id(entry.id)
+        if not external_id or external_id in seen:
+            continue
+        name = (entry.name or "").strip() or roster_name_for_external_id(external_id)
+        entries.append((external_id, name))
+        seen.add(external_id)
+
+    for external_id in participant_ids or []:
+        clean_id = clean_external_id(external_id)
+        if clean_id and clean_id not in seen:
+            entries.append((clean_id, roster_name_for_external_id(clean_id)))
+            seen.add(clean_id)
+
+    changed = False
+    for external_id, name in entries:
+        participant = find_participant(session.participants, name, external_id, [external_id])
+        if participant:
+            before = (participant.name, participant.external_id, tuple(participant.external_ids))
+            merge_participant_identity(participant, [external_id])
+            if is_roster_placeholder_name(participant.name) and not is_roster_placeholder_name(name):
+                participant.name = name
+            changed = changed or before != (
+                participant.name,
+                participant.external_id,
+                tuple(participant.external_ids),
+            )
+            continue
+
+        session.participants.append(
+            Participant(name=name, external_id=external_id, external_ids=[external_id])
+        )
+        changed = True
+
+    normalized = merge_duplicate_participants(session.participants)
+    if len(normalized) != len(session.participants):
+        changed = True
+    session.participants = normalized
+    return changed
 
 
 def should_invoke(session: Session, text: str) -> bool:

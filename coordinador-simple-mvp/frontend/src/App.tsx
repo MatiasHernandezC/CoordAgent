@@ -44,8 +44,7 @@ import { GoogleCalendarPanel } from "./components/GoogleCalendarPanel";
 import { getErrorMessage } from "./format";
 import type { AppUser, Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
-const BOT_PHONE_DISPLAY = import.meta.env.VITE_BOT_PHONE_NUMBER ?? "+56 9 3527 1985";
-const BOT_PHONE_DIGITS = BOT_PHONE_DISPLAY.replace(/\D/g, "");
+const BOT_PHONE_FALLBACK = "Numero no disponible hasta vincular WhatsApp";
 const PUBLIC_APP_URL = import.meta.env.VITE_API_URL ?? window.location.origin;
 const AUTO_REFRESH_MS = 20000;
 
@@ -125,6 +124,8 @@ export function App() {
   const currentChannelMessages = useMemo(() => (session ? channelMessagesForCurrentContext(session) : []), [session]);
   const latestMessageCount = currentChannelMessages.length;
   const gateway = opsStatus?.gateway ?? null;
+  const botPhoneDisplay = gateway?.bot_phone_number || BOT_PHONE_FALLBACK;
+  const botPhoneDigits = (gateway?.bot_phone_number || "").replace(/\D/g, "");
   const botMetricValue = gateway?.connected
     ? "Vinculado"
     : gateway?.state === "logged_out"
@@ -135,14 +136,14 @@ export function App() {
   const botMetricDetail = gateway?.connected
     ? gateway.dead_letter_messages || gateway.queue_overflow_count
       ? `Cola requiere revision: ${gateway.dead_letter_messages ?? 0} aislado(s)`
-      : `${BOT_PHONE_DISPLAY} - ${gateway.known_groups ?? 0} grupo(s), ${gateway.pending_messages ?? 0} pendiente(s)`
+      : `${botPhoneDisplay} - ${gateway.known_groups ?? 0} grupo(s), ${gateway.pending_messages ?? 0} pendiente(s)`
     : gateway?.state === "reconnecting"
       ? `Reconectando (intento ${gateway.reconnect_attempt ?? 0})`
       : gateway?.state === "logged_out"
         ? "Requiere volver a vincular WhatsApp"
         : gateway
           ? `Estado: ${gateway.state}`
-          : BOT_PHONE_DISPLAY;
+          : botPhoneDisplay;
   const bestOption = session?.options[0] ?? null;
   const confirmedOption = session?.selected_option ?? null;
   const lastProcessing = session?.last_processing ?? null;
@@ -158,15 +159,21 @@ export function App() {
     [sessions, sessionFilter, sessionSearch]
   );
   const inviteMessage = useMemo(
-    () => buildInviteMessage({ groupName, adminName, inviteLink }),
-    [groupName, adminName, inviteLink]
+    () => buildInviteMessage({ groupName, adminName, inviteLink, botPhone: botPhoneDisplay }),
+    [groupName, adminName, inviteLink, botPhoneDisplay]
   );
   const adminWhatsAppUrl = adminDigits
     ? `https://wa.me/${adminDigits}?text=${encodeURIComponent(inviteMessage)}`
     : "";
-  const botDirectUrl = `https://wa.me/${BOT_PHONE_DIGITS}?text=${encodeURIComponent(
+  const botDirectUrl = botPhoneDigits ? `https://wa.me/${botPhoneDigits}?text=${encodeURIComponent(
     "Hola, te voy a agregar a un grupo de prueba para coordinar horarios con @coordina."
-  )}`;
+  )}` : "";
+
+  useEffect(() => {
+    if (currentUser?.display_name || currentUser?.username) {
+      setAdminName(currentUser.display_name || currentUser.username);
+    }
+  }, [currentUser]);
 
   useEffect(() => {
     const savedAuth = getSavedAuth();
@@ -181,9 +188,9 @@ export function App() {
         setCurrentUser(user);
         setAuthState("authenticated");
         const adminRequests = user.is_admin
-          ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+          ? [refreshRuntime(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
           : [];
-        Promise.all([refreshSessions(undefined, { quiet: true }), ...adminRequests]).catch((err) =>
+        Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), ...adminRequests]).catch((err) =>
           setError(getErrorMessage(err))
         );
       })
@@ -198,9 +205,9 @@ export function App() {
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible" || busyRef.current) return;
       const adminRequests = isAdmin
-        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        ? [refreshRuntime(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
         : [];
-      Promise.all([refreshSessions(session?.id, { quiet: true }), ...adminRequests])
+      Promise.all([refreshSessions(session?.id, { quiet: true }), refreshOpsStatus(), ...adminRequests])
         .then(() => setError(""))
         .catch((err) => setError(getErrorMessage(err)));
     }, AUTO_REFRESH_MS);
@@ -289,9 +296,9 @@ export function App() {
       setCurrentUser(user);
       setAuthState("authenticated");
       const adminRequests = user.is_admin
-        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        ? [refreshRuntime(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
         : [];
-      await Promise.all([refreshSessions(undefined, { quiet: true }), ...adminRequests]);
+      await Promise.all([refreshSessions(undefined, { quiet: true }), refreshOpsStatus(), ...adminRequests]);
     });
   }
 
@@ -345,9 +352,9 @@ export function App() {
   async function handleRefreshAll() {
     await runAction("Actualizando panel...", async () => {
       const adminRequests = isAdmin
-        ? [refreshRuntime(), refreshOpsStatus(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
+        ? [refreshRuntime(), refreshLlmKeys(), refreshGoogleCalendar(), refreshUsers()]
         : [];
-      await Promise.all([refreshSessions(), ...adminRequests]);
+      await Promise.all([refreshSessions(), refreshOpsStatus(), ...adminRequests]);
     });
   }
 
@@ -557,7 +564,7 @@ export function App() {
 
   async function handleSetParticipantRequirements(
     name: string,
-    changes: { required?: boolean; priority?: number }
+    changes: { required?: boolean }
   ) {
     if (!session || session.archived_at) return;
     await runAction("Guardando requerimientos...", async () => {
@@ -973,7 +980,6 @@ export function App() {
                           <strong>
                             {participant.name}
                             {participant.required ? " ⭐" : ""}
-                            {participant.priority ? ` (pri ${participant.priority})` : ""}
                           </strong>
                           <p>{formatSlots(participant.availability)}</p>
                           <div className="person-controls">
@@ -989,24 +995,6 @@ export function App() {
                                 }
                               />
                               Requerido
-                            </label>
-                            <label className="inline-label">
-                              Prioridad
-                              <select
-                                value={participant.priority ?? 0}
-                                disabled={isBusy || Boolean(session.archived_at)}
-                                onChange={(event) =>
-                                  handleSetParticipantRequirements(participant.name, {
-                                    priority: Number(event.target.value)
-                                  })
-                                }
-                              >
-                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => (
-                                  <option key={value} value={value}>
-                                    {value || "—"}
-                                  </option>
-                                ))}
-                              </select>
                             </label>
                           </div>
                         </div>
@@ -1181,7 +1169,7 @@ export function App() {
             </div>
             <div className="bot-number">
               <span>Número del bot</span>
-              <strong>{BOT_PHONE_DISPLAY}</strong>
+              <strong>{botPhoneDisplay}</strong>
             </div>
             {session.channel_config.group_jid ? <>
               <p className="link-success">Conectado con {session.channel_config.group_name || "tu grupo de WhatsApp"}.</p>
@@ -1350,7 +1338,7 @@ export function App() {
 
             <div className="bot-number">
               <span>Numero del bot</span>
-              <strong>{BOT_PHONE_DISPLAY}</strong>
+              <strong>{botPhoneDisplay}</strong>
             </div>
 
             <div className="form-grid">
@@ -1413,17 +1401,19 @@ export function App() {
 function buildInviteMessage({
   groupName,
   adminName,
-  inviteLink
+  inviteLink,
+  botPhone
 }: {
   groupName: string;
   adminName: string;
   inviteLink: string;
+  botPhone: string;
 }) {
   const safeGroup = groupName.trim() || "el grupo de prueba";
   const safeAdmin = adminName.trim() || "admin";
   const linkLine = inviteLink.trim() ? ` Link del grupo: ${inviteLink.trim()}.` : "";
 
-  return `Hola ${safeAdmin}, agrega el bot ${BOT_PHONE_DISPLAY} al grupo "${safeGroup}".${linkLine} Luego escriban disponibilidades e invoquen con "@coordina".`;
+  return `Hola ${safeAdmin}, agrega el bot ${botPhone} al grupo "${safeGroup}".${linkLine} Luego escriban disponibilidades e invoquen con "@coordina".`;
 }
 
 function filterSessions(sessions: Session[], filter: SessionFilter, search: string) {

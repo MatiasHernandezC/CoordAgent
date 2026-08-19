@@ -264,6 +264,7 @@ export type GatewayStatus = {
   pending_messages?: number;
   dead_letter_messages?: number;
   queue_overflow_count?: number;
+  bot_phone_number?: string | null;
   last_queue_error_at?: string | null;
   last_connected_at?: string | null;
   last_disconnected_at?: string | null;

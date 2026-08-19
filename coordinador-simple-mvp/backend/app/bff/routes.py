@@ -220,6 +220,7 @@ def resolve_channel_group(payload: ResolveChannelGroupRequest):
             payload.group_participant_ids,
             payload.coordinator_ids,
             payload.trigger_word,
+            participant_roster=payload.participant_roster,
             create_if_missing=payload.create_if_missing,
         )
         return {"session": session}
@@ -236,6 +237,7 @@ def link_channel_group(payload: LinkChannelGroupRequest):
             payload.group_participant_ids,
             payload.coordinator_ids,
             payload.trigger_word,
+            participant_roster=payload.participant_roster,
         )
         return {"session": session}
 
@@ -346,7 +348,6 @@ def configure_participant_requirements(session_id: str, payload: ConfigurePartic
                 session_id,
                 payload.name,
                 required=payload.required,
-                priority=payload.priority,
             )
         }
 
@@ -431,6 +432,7 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest, request: R
             payload.group_participant_count,
             payload.group_participant_ids,
             payload.coordinator_ids,
+            payload.participant_roster,
         )
         if any(value is not None for value in advanced_fields) or (payload.trigger_word is not None and not is_owner):
             raise HTTPException(status_code=403, detail="La identidad del canal solo puede actualizarla el gateway.")
@@ -447,6 +449,7 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest, request: R
             payload.group_participant_count,
             payload.group_participant_ids,
             payload.coordinator_ids,
+            payload.participant_roster,
         )
         return {
             "session": session

@@ -154,6 +154,7 @@ def render_availability_png(session: Session, now: datetime | None = None) -> by
     hours = hours_for_session(session)
     layout = layout_for_hours(len(hours))
     height = layout["height"]
+    required_names = {participant.name.strip().casefold() for participant in session.participants if participant.required}
 
     image = Image.new("RGB", (WIDTH, height), SOFT)
     draw = ImageDraw.Draw(image)
@@ -189,6 +190,7 @@ def render_availability_png(session: Session, now: datetime | None = None) -> by
         hours=hours,
         cell_h=layout["cell_h"],
         head_h=layout["head_h"],
+        required_names=required_names,
     )
     draw_insights(draw, insight_box, session, best, fonts, now)
     draw_footer(draw, session, fonts, y=layout["footer_y"])
@@ -236,6 +238,7 @@ def draw_heatmap(
     hours: list[int] | None = None,
     cell_h: int = PREFERRED_CELL_H,
     head_h: int = 34,
+    required_names: set[str] | None = None,
 ) -> None:
     x0, y0, x1, y1 = box
     labels = day_labels or DAY_LABELS
@@ -284,6 +287,13 @@ def draw_heatmap(
                 width=width,
             )
             label = f"{score}/{total}"
+            if required_names and cell:
+                cell_required_names = {
+                    name.strip().casefold() for name in cell.available_participants
+                }
+                required_available_count = len(required_names.intersection(cell_required_names))
+                if required_available_count:
+                    label += " " + ("★" * required_available_count)
             draw_centered(draw, (cx, cy, cx + day_w, cy + cell_h), label, fonts["cell"], cell_text_color(pct))
 
 
@@ -316,17 +326,23 @@ def draw_insights(
         pass
     draw.text((x0 + 24, y0 + 182), subtitle, font=fonts["small"], fill=MUTED)
 
-    available = compact_names(best.available_participants, max_items=4)
-    unavailable = compact_names(best.unavailable_participants, max_items=3)
+    required_names = {participant.name.strip().casefold() for participant in session.participants if participant.required}
+    available = compact_names(mark_required_names(best.available_participants, required_names), max_items=4)
+    unavailable = compact_names(mark_required_names(best.unavailable_participants, required_names), max_items=3)
 
-    draw_label_block(draw, x0 + 24, y0 + 222, "Asisten", available or "Sin asistentes claros", GREEN, fonts)
+    content_offset = 0
+    if required_names:
+        draw.text((x0 + 24, y0 + 204), "★ Requerido", font=fonts["small"], fill=AMBER)
+        content_offset = 22
+
+    draw_label_block(draw, x0 + 24, y0 + 222 + content_offset, "Asisten", available or "Sin asistentes claros", GREEN, fonts)
     if best.unavailable_participants:
-        draw_label_block(draw, x0 + 24, y0 + 288, "No calzan", unavailable, RED, fonts)
+        draw_label_block(draw, x0 + 24, y0 + 288 + content_offset, "No calzan", unavailable, RED, fonts)
     else:
-        draw_label_block(draw, x0 + 24, y0 + 288, "Conflictos", "Ninguno detectado", TEAL, fonts)
+        draw_label_block(draw, x0 + 24, y0 + 288 + content_offset, "Conflictos", "Ninguno detectado", TEAL, fonts)
 
     if session.missing_info:
-        draw_missing(draw, (x0 + 24, y0 + 354, x1 - 24, y1 - 24), session, fonts)
+        draw_missing(draw, (x0 + 24, y0 + 354 + content_offset, x1 - 24, y1 - 24), session, fonts)
     else:
         draw_pill(draw, (x0 + 24, y1 - 58, x1 - 24, y1 - 24), "Listo para confirmar en el grupo", fonts["label"], (229, 246, 237), GREEN)
 
@@ -445,6 +461,14 @@ def compact_names(names: list[str], max_items: int = 4) -> str:
     if len(names) > max_items:
         suffix = f" +{len(names) - max_items}"
     return ", ".join(shown) + suffix
+
+
+def mark_required_names(names: list[str], required_names: set[str]) -> list[str]:
+    """Marca visualmente los nombres obligatorios en el resumen del calendario."""
+    return [
+        f"{name} ★" if name.strip().casefold() in required_names else name
+        for name in names
+    ]
 
 
 def coverage_color(percent: int) -> tuple[int, int, int]:

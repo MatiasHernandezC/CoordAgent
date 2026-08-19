@@ -33,6 +33,7 @@ def fetch_gateway_status() -> dict:
         "pending_messages": int(payload.get("pendingMessages") or 0),
         "dead_letter_messages": int(payload.get("deadLetterMessages") or 0),
         "queue_overflow_count": int(payload.get("queueOverflowCount") or 0),
+        "bot_phone_number": payload.get("botPhoneNumber"),
         "last_queue_error_at": payload.get("lastQueueErrorAt"),
         "last_connected_at": payload.get("lastConnectedAt"),
         "last_disconnected_at": payload.get("lastDisconnectedAt"),

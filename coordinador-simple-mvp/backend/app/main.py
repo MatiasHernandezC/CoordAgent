@@ -131,7 +131,7 @@ async def protect_panel_api(request: Request, call_next):
         user = AuthUser("local-admin", "Administrador local", True)
     request.state.auth_user = user
 
-    if not user.is_admin and path in {"/api/runtime", "/api/ops/status"}:
+    if not user.is_admin and path == "/api/runtime":
         return _denied(request, 403, "Esta funcion requiere una cuenta administradora.")
     if not user.is_admin and path.startswith("/api/admin/"):
         return _denied(request, 403, "Esta funcion requiere una cuenta administradora.")

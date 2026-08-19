@@ -12,7 +12,7 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 
 import { sendAgentReply } from "./delivery.js";
-import { buildHumanRoster, identitiesOverlap } from "./group_metadata.js";
+import { humanParticipantRoster, identitiesOverlap } from "./group_metadata.js";
 import { channelMessagePayload, messageIdentityMetadataOf, messageTextOf } from "./message_metadata.js";
 import { extractLinkCode, isCoordinaInvocation } from "./linking.js";
 import { PersistentQueue } from "./persistent_queue.js";
@@ -66,6 +66,7 @@ let groupSyncTimer = null;
 let queueOverflowCount = 0;
 let lastQueueErrorAt = null;
 let currentQrSvg = null;
+let botPhoneNumber = null;
 const recentMessageIds = new Set();
 
 function qrToSvg(value) {
@@ -149,6 +150,7 @@ function mapEntry(sessionId, groupJid, metadata) {
     group_participant_count: metadata.participantCount,
     group_participant_ids: metadata.participantIds,
     coordinator_ids: metadata.coordinatorIds,
+    participant_roster: metadata.participantRoster,
     updated_at: new Date().toISOString()
   };
 }
@@ -163,7 +165,7 @@ async function readGroupMetadata(sock, groupJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
     const groupName = cleanLabel(metadata?.subject, "grupo de WhatsApp");
-    const roster = buildHumanRoster(metadata?.participants, sock.user);
+    const roster = humanParticipantRoster(metadata?.participants, sock.user);
     if (!roster) {
       throw new Error("WhatsApp no entrego la lista de participantes");
     }
@@ -217,7 +219,8 @@ async function configureBackendChannel(sessionId, groupJid, metadata) {
       group_name: metadata.groupName,
       group_participant_count: metadata.participantCount,
       group_participant_ids: metadata.participantIds,
-      coordinator_ids: metadata.coordinatorIds
+      coordinator_ids: metadata.coordinatorIds,
+      participant_roster: metadata.participantRoster
     })
   });
 }
@@ -268,6 +271,7 @@ async function sessionForGroupUnlocked(sock, groupJid) {
       group_participant_count: metadata.participantCount,
       group_participant_ids: metadata.participantIds,
       coordinator_ids: metadata.coordinatorIds,
+      participant_roster: metadata.participantRoster,
       trigger_word: TRIGGER_WORD,
       create_if_missing: false
     })
@@ -384,6 +388,7 @@ function handleConnectionUpdate(sock, update) {
 
   if (connection === "open") {
     currentQrSvg = null;
+    botPhoneNumber = phoneNumberFromIdentity(sock.user);
     reconnectAttempt = 0;
     connectionState = "connected";
     lastConnectedAt = new Date().toISOString();
@@ -413,6 +418,15 @@ function handleConnectionUpdate(sock, update) {
     connectionState = "reconnecting";
     scheduleReconnect(`conexion cerrada por WhatsApp, status=${statusCode ?? "desconocido"}`);
   }
+}
+
+function phoneNumberFromIdentity(identity) {
+  const raw = typeof identity === "string" ? identity : identity?.id;
+  if (typeof raw !== "string") return null;
+  const [localPart, server] = raw.split("@", 2);
+  if (!server || !["s.whatsapp.net", "c.us"].includes(server)) return null;
+  const digits = localPart.split(":", 1)[0].replace(/\D/g, "");
+  return digits ? `+${digits}` : null;
 }
 
 async function handleMessages(sock, { messages, type }) {
@@ -574,6 +588,7 @@ async function linkPendingGroup(sock, item, linkCode) {
         group_participant_count: metadata.participantCount,
         group_participant_ids: metadata.participantIds,
         coordinator_ids: metadata.coordinatorIds,
+        participant_roster: metadata.participantRoster,
         trigger_word: TRIGGER_WORD,
         create_if_missing: false
       })
@@ -715,6 +730,7 @@ function gatewayStatus() {
     deadLetterMessages: pendingQueue.deadLetterSize,
     queueOverflowCount,
     lastQueueErrorAt,
+    botPhoneNumber,
     lastConnectedAt,
     lastDisconnectedAt,
     lastConnectionReason,

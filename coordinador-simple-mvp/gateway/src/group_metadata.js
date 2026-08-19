@@ -137,6 +137,45 @@ export function buildHumanRoster(participants, ownIdentity) {
   };
 }
 
+function cleanRosterName(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, " ").slice(0, 120);
+}
+
+function fallbackRosterName(identity) {
+  const primary = canonicalAlias([...identity.aliases]);
+  const [localPart = "nuevo"] = primary.split("@", 1);
+  if (primary.endsWith("@s.whatsapp.net") && /^\d+$/.test(localPart)) {
+    return `+${localPart}`;
+  }
+  return `Participante ${localPart.slice(-8) || "nuevo"}`;
+}
+
+/** Devuelve el mismo padron con nombres visibles para hidratar el panel. */
+export function humanParticipantRoster(participants, ownIdentity) {
+  const roster = buildHumanRoster(participants, ownIdentity);
+  if (!roster) return null;
+
+  const ownAliases = new Set(identityAliases(ownIdentity));
+  const identities = participantIdentities(participants);
+  const participantRoster = identities
+    .filter((identity) => ![...identity.aliases].some((alias) => ownAliases.has(alias)))
+    .map((identity) => {
+      const aliases = [...identity.aliases];
+      const primary = canonicalAlias(aliases);
+      const source = participants.find((participant) =>
+        identityAliases(participant).some((alias) => aliases.includes(alias))
+      );
+      const name = cleanRosterName(
+        source?.notify ?? source?.pushName ?? source?.displayName ?? source?.name
+      );
+      return { id: primary, name: name || fallbackRosterName(identity) };
+    })
+    .filter((entry) => entry.id);
+
+  return { ...roster, participantRoster };
+}
+
 export function humanParticipantCount(participants, ownIdentity) {
   return buildHumanRoster(participants, ownIdentity)?.participantCount ?? null;
 }

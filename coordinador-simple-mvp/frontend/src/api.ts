@@ -224,10 +224,10 @@ export function removeParticipant(sessionId: string, participantName: string) {
 }
 
 export function configureParticipantRequirements(
-  sessionId: string,
-  name: string,
-  changes: { required?: boolean; priority?: number }
-) {
+    sessionId: string,
+    name: string,
+    changes: { required?: boolean }
+  ) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/participants/requirements`, {
     method: "POST",
     body: JSON.stringify({ name, ...changes })

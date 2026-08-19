@@ -216,6 +216,40 @@ def resolve_channel_name(channel_id: str) -> str:
         return channel_id
 
 
+def resolve_channel_roster(channel_id: str, bot_user_id: str | None = None) -> dict | None:
+    """Obtiene los miembros humanos de un canal para hidratarlo sin esperar mensajes."""
+    if not channel_id:
+        return None
+    try:
+        members: list[str] = []
+        cursor = ""
+        while True:
+            response = requests.get(
+                f"{SLACK_API_BASE}/conversations.members",
+                headers=_headers(),
+                params={"channel": channel_id, "limit": 200, **({"cursor": cursor} if cursor else {})},
+                timeout=20,
+            )
+            payload = _payload_or_raise(response, "No fue posible leer los miembros del canal.")
+            members.extend(str(member) for member in payload.get("members") or [])
+            cursor = str((payload.get("response_metadata") or {}).get("next_cursor") or "").strip()
+            if not cursor:
+                break
+
+        human_ids = [member for member in dict.fromkeys(members) if member and member != bot_user_id]
+        return {
+            "participant_count": len(human_ids),
+            "participant_ids": human_ids,
+            "coordinator_ids": [],
+            "participant_roster": [
+                {"id": member, "name": resolve_display_name(member)} for member in human_ids
+            ],
+        }
+    except (requests.RequestException, ValueError, SlackApiError, SlackConfigError) as error:
+        logger.warning("slack_channel_roster_failed channel=%s error=%s", channel_id, error)
+        return None
+
+
 def _raise_for_slack_error(response: requests.Response) -> None:
     try:
         payload = response.json()

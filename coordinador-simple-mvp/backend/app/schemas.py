@@ -33,6 +33,11 @@ class TimeSlot(BaseModel):
     week_offset: int = 0
 
 
+class ParticipantRosterEntry(BaseModel):
+    id: WhatsAppUserId
+    name: str = Field(min_length=1, max_length=120)
+
+
 class Participant(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
@@ -330,9 +335,8 @@ class AddParticipantRequest(BaseModel):
 
 class ConfigureParticipantRequirementsRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    # Ambos opcionales: permite cambiar solo una dimensión sin tocar la otra.
+    # Solo se configura si la persona es obligatoria para la coordinacion.
     required: bool | None = None
-    priority: int | None = Field(default=None, ge=0, le=10)
 
 
 class AddAvailabilityRequest(BaseModel):
@@ -363,6 +367,7 @@ class ChannelConfigRequest(BaseModel):
     group_participant_count: int | None = Field(default=None, ge=0, le=2048)
     group_participant_ids: list[str] | None = None
     coordinator_ids: list[str] | None = None
+    participant_roster: list[ParticipantRosterEntry] | None = None
 
     @model_validator(mode="after")
     def check_complete_workday_window(self) -> "ChannelConfigRequest":
@@ -381,6 +386,7 @@ class ResolveChannelGroupRequest(BaseModel):
     group_participant_count: int | None = Field(default=None, ge=0, le=2048)
     group_participant_ids: list[str] = Field(default_factory=list)
     coordinator_ids: list[str] = Field(default_factory=list)
+    participant_roster: list[ParticipantRosterEntry] = Field(default_factory=list)
     trigger_word: str = Field(default="@coordina", min_length=2, max_length=40)
     create_if_missing: bool = True
 

@@ -83,8 +83,9 @@ services:
       context: ./frontend
       args:
         # Mismo dominio que sirve Caddy: las llamadas /api quedan en el mismo origen.
-        VITE_API_URL: ${PUBLIC_URL:-http://localhost}
-        VITE_BOT_PHONE_NUMBER: ${BOT_PHONE_NUMBER:-+56 9 3527 1985}
+        # Usa el mismo origen para que el panel funcione tanto localmente como
+        # detras del dominio o tunel publico.
+        VITE_API_URL: ${VITE_API_URL:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
       interval: 30s
