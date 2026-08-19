@@ -33,6 +33,12 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       LLM_KEYS_MASTER_KEY: ${LLM_KEYS_MASTER_KEY:-}
       ADMIN_PROXY_HEADER_REQUIRED: ${ADMIN_PROXY_HEADER_REQUIRED:-true}
+      PANEL_AUTH_REQUIRED: "true"
+      PANEL_ADMIN_USERNAME: ${PANEL_ADMIN_USERNAME:-admin}
+      PANEL_ADMIN_DISPLAY_NAME: ${PANEL_ADMIN_DISPLAY_NAME:-Administrador}
+      PANEL_ADMIN_PASSWORD: ${PANEL_ADMIN_PASSWORD:?define PANEL_ADMIN_PASSWORD en .env.prod}
+      PANEL_SELF_REGISTRATION_ENABLED: ${PANEL_SELF_REGISTRATION_ENABLED:-true}
+      GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:?define GATEWAY_API_TOKEN en .env.prod}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
       GEMINI_MODEL_FALLBACK: ${GEMINI_MODEL_FALLBACK:-gemini-flash-lite-latest}
       GEMINI_COOLDOWN_SECONDS: ${GEMINI_COOLDOWN_SECONDS:-60}
@@ -84,6 +90,7 @@ services:
     build: ./gateway
     environment:
       BACKEND_URL: http://backend:8000
+      GATEWAY_API_TOKEN: ${GATEWAY_API_TOKEN:?define GATEWAY_API_TOKEN en .env.prod}
       TRIGGER_WORD: ${TRIGGER_WORD:-@coordina}
       WA_AUTH_DIR: /data/wa-auth
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -129,23 +136,6 @@ services:
       - "443:443"
     environment:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
-      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?define BASIC_AUTH_USER en .env.prod}
-      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?define BASIC_AUTH_HASH en .env.prod}
-      # Admins adicionales (uno por area, ej. Finanzas/TI). Slots sin usar
-      # quedan con un usuario/hash inertes: cada uno es el hash de una
-      # password aleatoria distinta (nunca documentada), asi que ese login
-      # nunca es valido en la practica y ademas ningun slot comparte
-      # credenciales con otro. Caddy no acepta basic_auth con campos vacios,
-      # por eso el placeholder en vez de dejarlo en blanco. Sobreescribe en
-      # .env.prod para habilitar un slot de verdad.
-      BASIC_AUTH_USER_2: ${BASIC_AUTH_USER_2:-_disabled_2}
-      BASIC_AUTH_HASH_2: ${BASIC_AUTH_HASH_2:-$$2a$$14$$u/akr20Re8eW4fnzgG0dAeIXf4zad4ITa60kZdAmPbZuMu4LN96x.}
-      BASIC_AUTH_USER_3: ${BASIC_AUTH_USER_3:-_disabled_3}
-      BASIC_AUTH_HASH_3: ${BASIC_AUTH_HASH_3:-$$2a$$14$$MSnkVSIh0Dkot7DFhXBJX.8qRPzdaELLR8iyUY6SMzvkD.4siXQy2}
-      BASIC_AUTH_USER_4: ${BASIC_AUTH_USER_4:-_disabled_4}
-      BASIC_AUTH_HASH_4: ${BASIC_AUTH_HASH_4:-$$2a$$14$$1gG4VoLwdv.tLlmeLCIx6.hFIMQ8MhL5UqtKp0bxgw4cKcp/IjX7G}
-      BASIC_AUTH_USER_5: ${BASIC_AUTH_USER_5:-_disabled_5}
-      BASIC_AUTH_HASH_5: ${BASIC_AUTH_HASH_5:-$$2a$$14$$scXa2qJ9gYxP68mGmfk0uuBf35BDgeMApkn5FAYiY6dFOyW//Uz02}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -31,7 +31,7 @@ flowchart LR
 - Puertos `80` y `443` abiertos.
 - API key de Gemini o `LLM_PROVIDER=mock` para pruebas sin IA.
 - Numero dedicado con WhatsApp para escanear el QR.
-- Claves fuertes para Postgres y Basic Auth.
+- Claves fuertes y distintas para Postgres, el administrador y el gateway.
 
 Recursos recomendados para este MVP:
 
@@ -82,8 +82,9 @@ Variables principales:
 PUBLIC_DOMAIN=coordina.xshift007.com
 PUBLIC_URL=https://coordina.xshift007.com
 
-BASIC_AUTH_USER=coordina
-BASIC_AUTH_HASH=...
+PANEL_ADMIN_USERNAME=admin
+PANEL_ADMIN_PASSWORD=... # minimo 12 caracteres
+GATEWAY_API_TOKEN=... # otro secreto aleatorio
 
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=...
@@ -100,10 +101,10 @@ LOG_LEVEL=info
 BOT_PHONE_NUMBER=+56...
 ```
 
-Generar hash para Caddy:
+Generar secretos aleatorios para el panel/gateway:
 
 ```bash
-docker run --rm caddy:2 caddy hash-password --plaintext "tu_password"
+openssl rand -base64 32
 ```
 
 No imprimas ni pegues `.env.prod` en chats. El archivo contiene secretos.
@@ -121,7 +122,7 @@ aparezca cifrada y disponible; luego elimina `GEMINI_API_KEY` de `.env.prod` y
 recrea solo el backend. No elimines la llave maestra mientras existan
 credenciales cifradas.
 
-Las rutas `/api/admin/llm-keys*` requieren el usuario validado por Caddy. El
+Las rutas `/api/admin/llm-keys*` requieren una cuenta administradora validada por el backend. El
 frontend nunca guarda una llave Gemini en `localStorage` ni `sessionStorage`.
 
 ## Levantar Produccion
@@ -148,6 +149,13 @@ caddy     unico servicio con 80/443 publicados
 ```
 
 ## Vincular WhatsApp
+
+Hay dos vinculaciones distintas:
+
+1. El operador vincula una sola vez el número dedicado con el gateway escaneando el QR.
+2. Cada administrador de grupos crea su espacio en el frontend, agrega manualmente el bot a su grupo de WhatsApp y envía dentro del grupo `@coordina vincular CODIGO`.
+
+El código es aleatorio, pertenece a una sola cuenta y se elimina después de utilizarse. Un mensaje normal en un grupo aún no vinculado no crea una sesión huérfana ni entrega acceso a otra cuenta.
 
 Ver QR:
 
@@ -369,7 +377,7 @@ Si necesitas diagnosticar funciones internas de Baileys, puedes probar
 
 - No publiques `8000`, `5432` ni puertos del gateway.
 - Manten `.env.prod`, `keys/`, `pgdata` y `waauth` fuera de git.
-- Cambia la clave de Basic Auth si se compartio por error.
+- Cambia la clave del administrador si se compartio por error.
 - Usa un numero de WhatsApp dedicado.
 - Manten `LLM_FALLBACK_ENABLED=true` para demos, salvo pruebas donde quieras fallar fuerte.
 - Revisa logs si hay respuestas raras antes de culpar al frontend.
@@ -409,7 +417,7 @@ mantener la demo operativa. Revisa cuota, billing y frecuencia de llamadas.
 
 ### El panel carga pero no muestra datos
 
-Verifica credenciales de Basic Auth y CORS:
+Verifica las credenciales del panel y CORS:
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env.prod logs --tail 80 caddy

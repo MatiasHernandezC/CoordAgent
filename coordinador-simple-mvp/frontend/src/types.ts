@@ -107,7 +107,6 @@ export type ChannelConfig = {
   group_participant_count: number | null;
   group_participant_ids: string[];
   coordinator_ids: string[];
-  owner_admin: string | null;
 };
 
 export type ChannelMessage = {
@@ -151,19 +150,15 @@ export type GoogleCalendarStatus = {
   connected_at: string | null;
 };
 
-export type AdminUser = {
-  actor: string;
-  is_superadmin: boolean;
-  superadmin_locked: boolean;
-  first_seen_at: string | null;
-  last_seen_at: string | null;
-  owned_groups: number;
-};
-
 export type Session = {
   id: string;
   schema_version?: number;
   title: string;
+  owner_username: string | null;
+  link_code: string | null;
+  linked_at: string | null;
+  assigned_usernames: string[];
+  chief_participant_id: string | null;
   participants: Participant[];
   options: TimeOption[];
   availability_matrix: AvailabilityCell[];
@@ -188,6 +183,13 @@ export type Session = {
   habitual_history_index?: number | null;
 };
 
+export type AppUser = {
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  role: "platform_admin" | "group_admin";
+};
+
 export type RuntimeInfo = {
   provider: string;
   provider_label: string;
@@ -200,8 +202,6 @@ export type RuntimeInfo = {
   gemini_active_key_name: string | null;
   gemini_key_management_enabled: boolean;
   warnings: string[];
-  actor: string;
-  is_superadmin: boolean;
 };
 
 export type LlmKeyStatus = "unverified" | "ready" | "cooldown" | "invalid" | "incompatible" | "disabled";

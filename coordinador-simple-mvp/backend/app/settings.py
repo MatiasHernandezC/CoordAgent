@@ -72,6 +72,21 @@ class Settings:
     # Almacenamiento legacy (conservado por si necesitas rollback)
     data_file: Path = Path(os.getenv("DATA_FILE", "data/sessions.json"))
 
+    # Acceso al panel. En produccion no existe ninguna clave por defecto: el
+    # primer administrador se crea desde estas variables y la contrasena solo
+    # se conserva como hash. En desarrollo el sembrado demo es opt-in.
+    panel_auth_required: bool = env_bool("PANEL_AUTH_REQUIRED", app_env == "production")
+    panel_admin_username: str = os.getenv("PANEL_ADMIN_USERNAME", "admin").strip()
+    panel_admin_display_name: str = os.getenv("PANEL_ADMIN_DISPLAY_NAME", "Administrador").strip()
+    panel_admin_password: str = os.getenv("PANEL_ADMIN_PASSWORD", "")
+    panel_seed_demo_users: bool = env_bool("PANEL_SEED_DEMO_USERS", False)
+    panel_self_registration_enabled: bool = env_bool("PANEL_SELF_REGISTRATION_ENABLED", True)
+    users_file: Path = Path(os.getenv("USERS_FILE", "data/users.json"))
+
+    # Secreto compartido exclusivamente dentro de la red Docker para que el
+    # gateway de WhatsApp pueda sincronizar grupos sin usar una cuenta humana.
+    gateway_api_token: str = os.getenv("GATEWAY_API_TOKEN", "")
+
     # LLM provider
     llm_provider: str = os.getenv("LLM_PROVIDER", "local")
 
@@ -130,15 +145,6 @@ class Settings:
         "ADMIN_PROXY_HEADER_REQUIRED",
         app_env == "production",
     )
-    # Usuarios de Basic Auth (X-Coordina-Admin) que ven y administran todos
-    # los grupos, sin importar quien sea el owner_admin de cada sesion. Es un
-    # piso fijo (no se puede quitar desde el panel); ademas se puede promover
-    # a otros admins a superadmin desde /admin/users sin tocar esta variable.
-    superadmin_users: set[str] = {
-        u.strip() for u in os.getenv("SUPERADMIN_USERS", "").split(",") if u.strip()
-    }
-    admin_directory_file: Path = Path(os.getenv("ADMIN_DIRECTORY_FILE", "data/admin_directory.json"))
-
     # Canal Slack (opcional, ademas de WhatsApp). Sin bot token el canal queda
     # desactivado: el endpoint responde 503 en vez de fallar silenciosamente.
     slack_bot_token: str = os.getenv("SLACK_BOT_TOKEN", "")

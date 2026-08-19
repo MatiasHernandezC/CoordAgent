@@ -8,7 +8,9 @@ export async function sendAgentReply({ sock, jid, result, pendingItem, markProgr
     markProgress({ primarySent: true });
     logger?.info?.({ jid, format: result.agent_reply_format }, "respuesta con imagen enviada al grupo");
   } else if (result.agent_reply && !pendingItem.primarySent) {
-    await sock.sendMessage(jid, { text: result.agent_reply });
+    // Desactiva previews remotos: Coordina no los necesita y asi un enlace
+    // incluido en la respuesta nunca dispara una consulta SSRF desde el gateway.
+    await sock.sendMessage(jid, { text: result.agent_reply, linkPreview: null });
     markProgress({ primarySent: true });
     logger?.info?.({ jid, format: result.agent_reply_format }, "respuesta de texto enviada al grupo");
   }

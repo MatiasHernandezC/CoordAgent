@@ -395,7 +395,7 @@ def test_upload_file_raises_when_get_upload_url_fails(monkeypatch):
         upload_file("C123", "evento.ics", b"data")
 
 
-# --- _deliver adjunta botones cuando hay opciones vigentes -------------------
+# --- Botones de Block Kit ------------------------------------------------------
 
 def test_deliver_attaches_confirm_option_blocks(client, monkeypatch):
     session_id, session_dict = _prepare_slack_group_with_options(client)
@@ -420,8 +420,6 @@ def test_deliver_attaches_confirm_option_blocks(client, monkeypatch):
     values = [json.loads(el["value"]) for el in blocks[0]["elements"]]
     assert values[0] == {"sid": session_id, "oid": session_dict["options"][0]["id"], "rev": session_dict["proposal_revision"]}
 
-
-# --- Interactivity: click en boton de Block Kit -------------------------------
 
 def test_block_action_bad_signature_rejected(client):
     response = _post_interaction(client, {"type": "block_actions"}, bad_signature=True)

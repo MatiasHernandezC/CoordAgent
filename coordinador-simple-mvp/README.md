@@ -7,7 +7,7 @@ opciones y responde con texto y, opcionalmente, una imagen/calendario.
 Estado actual del MVP:
 
 1. Panel web React para administrar sesiones y grupos.
-2. Login simple en el frontend y Basic Auth en Caddy para proteger `/api/*`.
+2. Registro de cuentas y dos roles separados: administrador de plataforma y administrador propietario de grupos.
 3. Backend FastAPI con repositorio PostgreSQL en produccion y JSON para tests.
 4. Gateway WhatsApp basado en Baileys, con una sesion automatica por grupo.
 5. Gemini `gemini-2.5-flash-lite` como extractor principal, con cache, cooldown y fallback por reglas.
@@ -18,6 +18,13 @@ Estado actual del MVP:
 10. Cola persistente e idempotencia por ID de WhatsApp para reintentar sin duplicar decisiones.
 11. Healthchecks, rotacion de logs, respaldo cifrado y monitor systemd del droplet.
 12. Canal Slack opcional (ademas de WhatsApp), reutilizando el mismo pipeline de extraccion/decision. Ver [docs/DESPLIEGUE_SLACK.md](docs/DESPLIEGUE_SLACK.md).
+
+## Roles y propiedad de grupos
+
+- `platform_admin`: administra IA/Gemini, integraciones, usuarios, operación y todos los grupos.
+- `group_admin`: se registra desde el frontend, crea sus grupos y solo puede administrar los grupos de su propiedad.
+- Un grupo creado por `group_admin` entrega un código de un solo uso. Después de agregar manualmente el bot al grupo de WhatsApp, el propietario envía `@coordina vincular CODIGO` dentro del grupo.
+- El código se invalida al vincularse; un grupo no puede ser reclamado por dos cuentas.
 13. Integracion opcional con Google Calendar: al confirmar, crea el evento real en la cuenta conectada (ademas del link/.ics de siempre). Ver [docs/CONFIGURACION_GOOGLE_CALENDAR.md](docs/CONFIGURACION_GOOGLE_CALENDAR.md).
 
 ## Mejoras Operativas
@@ -65,7 +72,7 @@ literal antes del extractor (ver `docs/ARQUITECTURA.md`). La trazabilidad marca
 ```mermaid
 flowchart LR
   Admin["Administrador"] --> UI["Frontend React"]
-  UI --> Edge["Caddy HTTPS + Basic Auth en API"]
+  UI --> Edge["Caddy HTTPS"]
   Edge --> API["FastAPI BFF"]
   API --> DB["PostgreSQL"]
   API --> Gemini["Gemini API"]
@@ -138,7 +145,7 @@ docker compose up --build
 
 Produccion usa `docker-compose.prod.yml`:
 
-- `caddy`: publica 80/443, TLS automatico y Basic Auth para API.
+- `caddy`: publica 80/443, TLS automatico y headers de seguridad.
 - `frontend`: build estatico servido por nginx interno.
 - `backend`: FastAPI sin puerto publico directo.
 - `db`: PostgreSQL privado en la red Docker.
@@ -155,8 +162,9 @@ Variables clave de `.env.prod`:
 ```txt
 PUBLIC_DOMAIN=coordina.xshift007.com
 PUBLIC_URL=https://coordina.xshift007.com
-BASIC_AUTH_USER=coordina
-BASIC_AUTH_HASH=...
+PANEL_ADMIN_USERNAME=admin
+PANEL_ADMIN_PASSWORD=... # 12 caracteres o mas
+GATEWAY_API_TOKEN=... # secreto diferente y aleatorio
 POSTGRES_PASSWORD=...
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=... # solo para la migracion inicial

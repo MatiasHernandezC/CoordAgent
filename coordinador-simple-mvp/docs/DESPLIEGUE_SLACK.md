@@ -57,9 +57,8 @@ pruebas.
    privados tambien agrega `message.groups` + scopes `groups:history`/`groups:read`.
 4. Guarda. Si Slack pide reinstalar el app (banner amarillo), hazlo.
 
-En produccion, Caddy deja `/api/channels/slack/events` sin Basic Auth (ver
-`Caddyfile`) porque Slack no puede mandar esas credenciales — la autenticacion
-real es la firma `X-Slack-Signature`, verificada en cada request.
+En produccion, `/api/channels/slack/events` no usa una cuenta del panel: la
+autenticacion real es la firma `X-Slack-Signature`, verificada en cada request.
 
 ## 4. Botones para confirmar (Interactivity & Shortcuts)
 
@@ -76,8 +75,8 @@ Al tocar un boton, el mensaje original se reemplaza en el mismo lugar con la
 confirmacion (no queda un mensaje duplicado). El `.ics` se sube aparte, igual
 que con `@coordina confirmar` por texto.
 
-En produccion, Caddy tambien deja `/api/channels/slack/interactions` sin
-Basic Auth por el mismo motivo que `/events` (ver `Caddyfile`).
+`/api/channels/slack/interactions` tampoco usa una cuenta del panel, por el
+mismo motivo que `/events`.
 
 ## 5. Probar
 
@@ -88,13 +87,12 @@ Camila puede lunes en la tarde
 @coordina
 ```
 
-Responde con las opciones (texto + botones), mismo formato que WhatsApp. Para
-confirmar: `@coordina confirmar` o tocando el boton de la opcion.
+Responde con las opciones, mismo formato que WhatsApp. Para confirmar:
+`@coordina confirmar` o el boton.
 
 Si algo falla, mira los logs del backend (`slack_event_processing_failed`,
-`slack_delivery_failed`, `slack_block_action_failed`). El handler nunca
-revienta el webhook — Slack siempre recibe `200 OK` y el error queda solo en
-el log.
+`slack_delivery_failed`). El handler nunca revienta el webhook — Slack
+siempre recibe `200 OK` y el error queda solo en el log.
 
 ## Limitaciones (MVP)
 

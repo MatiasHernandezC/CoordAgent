@@ -7,7 +7,7 @@ Guia para continuar el proyecto sin perder la separacion de responsabilidades.
 Construir y mantener un coordinador de horarios con:
 
 1. Panel administrativo profesional.
-2. Login visual y API protegida por Caddy Basic Auth.
+2. Login real con roles y API protegida por FastAPI.
 3. Bot de WhatsApp para grupos reales.
 4. Una sesion automatica por grupo.
 5. Extraccion de disponibilidad con Gemini y fallback por reglas.
@@ -106,7 +106,7 @@ Responsabilidades:
 - Backend, DB y gateway quedan privados en red Docker.
 - PostgreSQL usa volumen `pgdata`.
 - WhatsApp usa volumen `waauth`.
-- Basic Auth se configura con hash bcrypt de Caddy.
+- El primer administrador y el secreto interno del gateway se configuran por entorno.
 - Produccion usa Gemini remoto para no cargar RAM local.
 
 ## Flujo De Desarrollo Recomendado

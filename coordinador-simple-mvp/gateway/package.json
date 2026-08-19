@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
-    "link-preview-js": "^3.2.0",
     "pino": "^9.5.0",
     "qrcode-terminal": "^0.12.0"
   }

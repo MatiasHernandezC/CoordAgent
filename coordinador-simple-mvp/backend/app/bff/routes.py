@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse
 from app.schemas import (
     AddAvailabilityRequest,
     AddParticipantRequest,
-    AdminUserListResponse,
+    AssignChiefRequest,
+    AssignSessionUsersRequest,
     ChannelBatchRequest,
     ChannelConfigRequest,
     ChannelMessageRequest,
@@ -22,16 +23,15 @@ from app.schemas import (
     GoogleCalendarAuthUrl,
     GoogleCalendarStatus,
     LlmKeyListResponse,
+    LinkChannelGroupRequest,
     MessageRequest,
     MessageResponse,
     RuntimeInfo,
     ResolveChannelGroupRequest,
     TimeSlot,
-    UpdateAdminUserRequest,
     UpdateLlmKeyRequest,
 )
 from app.settings import settings
-from app.services.admin_directory_service import admin_directory_service
 from app.services.calendar_export import build_calendar_ics
 from app.services.google_calendar_service import (
     GoogleCalendarApiError,
@@ -44,6 +44,7 @@ from app.services.habitual_time import detect_habitual_phrase
 from app.services.llm_service import LlmUnavailableError, has_extractable_scheduling_signal, llm_service
 from app.services.llm_key_service import llm_key_service
 from app.services.ops_status import fetch_gateway_status
+from app.services.auth_service import auth_service, current_user
 from app.services.session_service import (
     build_cancelled_channel_reply,
     build_channel_caption,
@@ -72,8 +73,7 @@ logger = logging.getLogger("app.routes")
 
 
 @router.get("/runtime", response_model=RuntimeInfo)
-def runtime_info(request: Request):
-    actor = require_admin_actor(request)
+def runtime_info():
     model_by_provider = {
         "local": settings.local_llm_model,
         "gemini": settings.gemini_model,
@@ -101,29 +101,7 @@ def runtime_info(request: Request):
         gemini_active_key_name=active_key["name"] if active_key else None,
         gemini_key_management_enabled=key_state["management_enabled"],
         warnings=warnings,
-        actor=actor,
-        is_superadmin=is_superadmin_actor(actor),
     )
-
-
-@router.get("/admin/users", response_model=AdminUserListResponse)
-def list_admin_users(request: Request):
-    actor = require_admin_actor(request)
-    require_superadmin(actor)
-    return AdminUserListResponse(users=build_admin_user_list())
-
-
-@router.patch("/admin/users/{target_actor}", response_model=AdminUserListResponse)
-def update_admin_user(target_actor: str, payload: UpdateAdminUserRequest, request: Request):
-    actor = require_admin_actor(request)
-    require_superadmin(actor)
-    if target_actor in settings.superadmin_users and not payload.is_superadmin:
-        raise HTTPException(
-            status_code=400,
-            detail="Este administrador es superadmin fijo por configuracion (SUPERADMIN_USERS); no se puede quitar desde el panel.",
-        )
-    admin_directory_service.set_superadmin(target_actor, payload.is_superadmin)
-    return AdminUserListResponse(users=build_admin_user_list())
 
 
 @router.get("/ops/status")
@@ -222,8 +200,13 @@ def _google_calendar_result_page(ok: bool, message: str) -> HTMLResponse:
 
 
 @router.post("/sessions")
-def create_session(payload: CreateSessionRequest):
-    session = session_service.create(payload.title)
+def create_session(payload: CreateSessionRequest, request: Request):
+    user = current_user(request)
+    session = session_service.create(
+        payload.title,
+        owner_username=None if user.is_admin else user.username,
+        prepare_whatsapp=not user.is_admin,
+    )
     return {"session": session}
 
 
@@ -237,29 +220,81 @@ def resolve_channel_group(payload: ResolveChannelGroupRequest):
             payload.group_participant_ids,
             payload.coordinator_ids,
             payload.trigger_word,
+            create_if_missing=payload.create_if_missing,
+        )
+        return {"session": session}
+
+
+@router.post("/channel/groups/link")
+def link_channel_group(payload: LinkChannelGroupRequest):
+    with session_service.group_lock(payload.group_jid):
+        session = session_service.link_channel_group(
+            payload.link_code,
+            payload.group_jid,
+            payload.group_name,
+            payload.group_participant_count,
+            payload.group_participant_ids,
+            payload.coordinator_ids,
+            payload.trigger_word,
         )
         return {"session": session}
 
 
 @router.get("/sessions")
 def list_sessions(request: Request):
-    actor = require_admin_actor(request)
-    return {"sessions": session_service.list_sessions(actor, is_superadmin_actor(actor))}
+    user = current_user(request)
+    sessions = session_service.list_sessions()
+    if not user.is_admin:
+        sessions = [
+            session
+            for session in sessions
+            if session.owner_username == user.username or user.username in session.assigned_usernames
+        ]
+        sessions = [
+            session if session.owner_username == user.username else session_for_user(session)
+            for session in sessions
+        ]
+    return {"sessions": sessions}
 
 
 @router.get("/sessions/{session_id}")
 def get_session(session_id: str, request: Request):
     session = session_service.get(session_id)
-    require_group_access(request, session)
-    return {"session": session}
+    user = current_user(request)
+    return {
+        "session": session
+        if user.is_admin or session.owner_username == user.username
+        else session_for_user(session)
+    }
+
+
+@router.put("/sessions/{session_id}/access")
+def assign_session_access(session_id: str, payload: AssignSessionUsersRequest):
+    normalized = sorted({auth_service.normalize_username(value) for value in payload.usernames})
+    missing = [username for username in normalized if not auth_service.get_user(username)]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Usuarios inexistentes: {', '.join(missing)}")
+    with session_service.session_lock(session_id):
+        return {"session": session_service.assign_users(session_id, normalized)}
+
+
+@router.put("/sessions/{session_id}/chief")
+def assign_session_chief(session_id: str, payload: AssignChiefRequest, request: Request):
+    with session_service.session_lock(session_id):
+        session = session_service.assign_chief(session_id, payload.participant_id)
+    user = current_user(request)
+    return {
+        "session": session
+        if user.is_admin or session.owner_username == user.username
+        else session_for_user(session)
+    }
 
 
 @router.post("/sessions/{session_id}/message", response_model=MessageResponse)
-def add_message(session_id: str, payload: MessageRequest, request: Request):
+def add_message(session_id: str, payload: MessageRequest):
     started = perf_counter()
     with session_service.session_lock(session_id):
         session = session_service.get(session_id)
-        require_group_access(request, session)
         group_memory = build_group_memory_context(session)
         try:
             extraction, source, token_usage = llm_service.extract_availability(
@@ -292,25 +327,20 @@ def add_message(session_id: str, payload: MessageRequest, request: Request):
 
 
 @router.post("/sessions/{session_id}/participants")
-def add_participant(session_id: str, payload: AddParticipantRequest, request: Request):
+def add_participant(session_id: str, payload: AddParticipantRequest):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.add_participant(session_id, payload.name)}
 
 
 @router.delete("/sessions/{session_id}/participants/{participant_name}")
-def remove_participant(session_id: str, participant_name: str, request: Request):
+def remove_participant(session_id: str, participant_name: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.remove_participant(session_id, participant_name)}
 
 
 @router.post("/sessions/{session_id}/participants/requirements")
-def configure_participant_requirements(
-    session_id: str, payload: ConfigureParticipantRequirementsRequest, request: Request
-):
+def configure_participant_requirements(session_id: str, payload: ConfigureParticipantRequirementsRequest):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {
             "session": session_service.configure_participant_requirements(
                 session_id,
@@ -322,24 +352,21 @@ def configure_participant_requirements(
 
 
 @router.post("/sessions/{session_id}/availability")
-def add_availability(session_id: str, payload: AddAvailabilityRequest, request: Request):
+def add_availability(session_id: str, payload: AddAvailabilityRequest):
     slot = TimeSlot(day=payload.day, start=payload.start, end=payload.end)
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.add_availability(session_id, payload.participant_name, slot)}
 
 
 @router.post("/sessions/{session_id}/calculate")
-def calculate(session_id: str, request: Request):
+def calculate(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.calculate(session_id)}
 
 
 @router.post("/sessions/{session_id}/confirm")
-def confirm(session_id: str, payload: ConfirmRequest, request: Request):
+def confirm(session_id: str, payload: ConfirmRequest):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         session = session_service.confirm(
             session_id,
             payload.option_id,
@@ -351,46 +378,40 @@ def confirm(session_id: str, payload: ConfirmRequest, request: Request):
 
 
 @router.post("/sessions/{session_id}/cancel-decision")
-def cancel_decision(session_id: str, request: Request):
+def cancel_decision(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.cancel_decision(session_id)}
 
 
 @router.post("/sessions/{session_id}/archive")
-def archive_session(session_id: str, request: Request):
+def archive_session(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.archive(session_id)}
 
 
 @router.post("/sessions/{session_id}/reopen")
-def reopen_session(session_id: str, request: Request):
+def reopen_session(session_id: str):
     with session_service.session_lock(session_id):
-        require_group_access(request, session_service.get(session_id))
         return {"session": session_service.reopen(session_id)}
 
 
 @router.get("/sessions/{session_id}/export", response_model=ExportResponse)
-def export_session(session_id: str, request: Request):
+def export_session(session_id: str):
     session = session_service.get(session_id)
-    require_group_access(request, session)
     safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
     return ExportResponse(filename=f"{safe_name}-reporte.txt", text=build_export_text(session))
 
 
 @router.get("/sessions/{session_id}/export.csv", response_model=ExportResponse)
-def export_session_csv(session_id: str, request: Request):
+def export_session_csv(session_id: str):
     session = session_service.get(session_id)
-    require_group_access(request, session)
     safe_name = safe_filename(session.channel_config.group_name or session.title or "coordina")
     return ExportResponse(filename=f"{safe_name}-datos.csv", text=build_export_csv(session))
 
 
 @router.get("/sessions/{session_id}/calendar", response_model=ExportResponse)
-def export_calendar(session_id: str, request: Request):
+def export_calendar(session_id: str):
     session = session_service.get(session_id)
-    require_group_access(request, session)
     if not session.selected_option:
         raise HTTPException(status_code=400, detail="Confirma una opcion antes de generar calendario.")
 
@@ -400,9 +421,20 @@ def export_calendar(session_id: str, request: Request):
 
 @router.patch("/sessions/{session_id}/channel/config")
 def configure_channel(session_id: str, payload: ChannelConfigRequest, request: Request):
+    user = getattr(request.state, "auth_user", None)
+    if user and not user.is_admin:
+        session = session_service.get(session_id)
+        is_owner = session.owner_username == user.username
+        advanced_fields = (
+            payload.group_jid,
+            payload.group_name,
+            payload.group_participant_count,
+            payload.group_participant_ids,
+            payload.coordinator_ids,
+        )
+        if any(value is not None for value in advanced_fields) or (payload.trigger_word is not None and not is_owner):
+            raise HTTPException(status_code=403, detail="La identidad del canal solo puede actualizarla el gateway.")
     with session_service.session_lock(session_id):
-        current = session_service.get(session_id)
-        actor = require_group_access(request, current)
         session = session_service.configure_channel(
             session_id,
             payload.listening_enabled,
@@ -415,11 +447,12 @@ def configure_channel(session_id: str, payload: ChannelConfigRequest, request: R
             payload.group_participant_count,
             payload.group_participant_ids,
             payload.coordinator_ids,
-            payload.owner_admin,
-            actor,
-            is_superadmin_actor(actor),
         )
-        return {"session": session}
+        return {
+            "session": session
+            if not user or user.is_admin or session.owner_username == user.username
+            else session_for_user(session)
+        }
 
 
 @router.post("/sessions/{session_id}/channel/messages", response_model=ChannelMessageResponse)
@@ -789,6 +822,11 @@ def invoke_channel_command_if_needed(
         reply = build_help_reply(session)
 
     elif command_name == "confirm":
+        # Recalcula siempre: si llego disponibilidad nueva junto al comando,
+        # las opciones deben reflejarla antes de cerrar la decision.
+        session = session_service.calculate(session_id)
+
+        option_index = command["option_index"]
         # El codigo Rn continua siendo aceptado para proteger confirmaciones
         # explicitas contra una propuesta antigua. Para el uso cotidiano no
         # obligamos a copiarlo: sin Rn se confirma la propuesta vigente que
@@ -1113,64 +1151,35 @@ def raise_llm_http_error(error: LlmUnavailableError) -> None:
 
 
 def require_admin_actor(request: Request) -> str:
+    user = getattr(request.state, "auth_user", None)
+    if user and user.username != "local-admin":
+        if not user.is_admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Esta operacion requiere una cuenta administradora.",
+            )
+        return user.username
     actor = request.headers.get("X-Coordina-Admin", "").strip()
     if settings.admin_proxy_header_required and not actor:
         raise HTTPException(
             status_code=403,
             detail="Esta operacion requiere autenticacion administrativa.",
         )
-    resolved = actor or "local-admin"
-    admin_directory_service.touch(resolved)
-    return resolved
+    return actor or "local-admin"
 
 
-def is_superadmin_actor(actor: str) -> bool:
-    # SUPERADMIN_USERS es un piso fijo por configuracion; ademas cualquier
-    # admin puede ser promovido a superadmin desde /admin/users sin tocar esa
-    # variable ni reiniciar el backend.
-    if actor in settings.superadmin_users:
-        return True
-    record = admin_directory_service.get(actor)
-    return bool(record and record.get("is_superadmin"))
+def session_for_user(session):
+    """Entrega solo los datos operativos que necesita una cuenta de grupo."""
+    visible = session.model_copy(deep=True)
+    visible.channel_config.group_participant_ids = []
+    visible.channel_config.coordinator_ids = []
+    visible.messages = []
+    visible.channel_command_receipts = []
+    visible.last_processing = None
+    visible.insights = []
+    return visible
 
 
-def require_superadmin(actor: str) -> None:
-    if not is_superadmin_actor(actor):
-        raise HTTPException(status_code=403, detail="Esta operacion requiere ser superadmin.")
-
-
-def build_admin_user_list() -> list[dict]:
-    records = {record["actor"]: record for record in admin_directory_service.list_all()}
-    for name in settings.superadmin_users:
-        records.setdefault(
-            name, {"actor": name, "is_superadmin": False, "first_seen_at": None, "last_seen_at": None}
-        )
-    ownership_counts = session_service.count_owned_by_actor()
-    users = []
-    for actor, record in records.items():
-        locked = actor in settings.superadmin_users
-        users.append({
-            "actor": actor,
-            "is_superadmin": locked or bool(record.get("is_superadmin")),
-            "superadmin_locked": locked,
-            "first_seen_at": record.get("first_seen_at"),
-            "last_seen_at": record.get("last_seen_at"),
-            "owned_groups": ownership_counts.get(actor, 0),
-        })
-    users.sort(key=lambda item: (not item["is_superadmin"], item["actor"].lower()))
-    return users
-
-
-def require_group_access(request: Request, session) -> str:
-    """Extiende require_admin_actor: ademas de identificar al admin, exige
-    que sea el owner_admin del grupo (o superadmin) cuando el grupo ya tiene
-    un dueno asignado. Sesiones sin owner_admin quedan abiertas a cualquier
-    admin autenticado (todavia no reclamadas por nadie)."""
-    actor = require_admin_actor(request)
-    owner = session.channel_config.owner_admin
-    if owner and actor != owner and not is_superadmin_actor(actor):
-        raise HTTPException(status_code=403, detail="No tienes acceso a este grupo.")
-    return actor
 
 
 def elapsed_ms(started: float) -> int:

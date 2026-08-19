@@ -25,7 +25,7 @@ solicitud.
 ## Monitor Del Droplet
 
 `ops/check_production_health.sh` agrega comprobaciones de Compose, consulta SQL,
-frontend, Caddy, HTTPS, proteccion Basic Auth, WhatsApp, respaldo cifrado y disco.
+frontend, Caddy, HTTPS, proteccion de la API, WhatsApp, respaldo cifrado y disco.
 No envia mensajes ni reinicia servicios. Una reconexion o un fallo HTTPS externo
 solo se declara fallo tras tres ejecuciones consecutivas; `logged_out`, una base
 inaccesible o una API desprotegida fallan de inmediato.
