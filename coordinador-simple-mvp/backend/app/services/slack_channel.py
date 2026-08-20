@@ -14,6 +14,7 @@ import time
 
 import requests
 
+from app.schemas import ParticipantRosterEntry
 from app.settings import settings
 
 logger = logging.getLogger("app.slack")
@@ -242,7 +243,7 @@ def resolve_channel_roster(channel_id: str, bot_user_id: str | None = None) -> d
             "participant_ids": human_ids,
             "coordinator_ids": [],
             "participant_roster": [
-                {"id": member, "name": resolve_display_name(member)} for member in human_ids
+                ParticipantRosterEntry(id=member, name=resolve_display_name(member)) for member in human_ids
             ],
         }
     except (requests.RequestException, ValueError, SlackApiError, SlackConfigError) as error:

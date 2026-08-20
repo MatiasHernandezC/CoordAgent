@@ -647,25 +647,33 @@ def execute_confirm_command(
     source: str,
     external_id: str | None,
     expected_revision: int | None,
+    force: bool = False,
 ) -> tuple:
     """Recalcula, valida blockers/revision, resuelve la opcion (por indice de
     texto o por id de boton), confirma y arma la respuesta + adjunto .ics.
     Devuelve (session, reply_text, document_b64, document_name, document_mimetype).
     Usado tanto por el comando de texto "confirmar N" (WhatsApp/Slack) como
-    por el click de un boton de Slack (Block Kit)."""
+    por el click de un boton de Slack (Block Kit). force=True (solo llega por
+    texto: "confirmar igual/de todos modos") salta unicamente el blocker de
+    gente sin identificar; las demas protecciones siguen aplicando."""
     session = session_service.calculate(session_id)
     if expected_revision is None:
         expected_revision = session.proposal_revision
 
-    blockers = confirmation_blockers(session)
+    blockers = confirmation_blockers(session, ignore_missing_info=force)
     if blockers:
         reply = (
             "*Coordina*\n\n"
             "No puedo confirmar todavia:\n"
             + "\n".join(f"- {item}" for item in blockers)
             + "\n\n"
-            + build_channel_reply(session)
         )
+        if session.missing_info and not force:
+            reply += (
+                "Si igual quieres confirmar, escribe "
+                f"*{session.channel_config.trigger_word} confirmar igual*.\n\n"
+            )
+        reply += build_channel_reply(session)
         return session, reply, None, None, None
 
     if expected_revision != session.proposal_revision:
@@ -708,6 +716,7 @@ def execute_confirm_command(
             source=source,
             external_id=external_id,
             expected_proposal_revision=expected_revision,
+            force=force,
         )
     except HTTPException as error:
         reply = f"*Coordina*\n\nNo puedo confirmar todavia. {error.detail}"
@@ -845,6 +854,7 @@ def invoke_channel_command_if_needed(
             source=command_source,
             external_id=external_id,
             expected_revision=command.get("proposal_revision"),
+            force=bool(command.get("force")),
         )
 
     elif command_name == "cancel":

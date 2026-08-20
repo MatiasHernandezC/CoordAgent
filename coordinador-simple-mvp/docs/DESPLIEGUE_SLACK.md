@@ -55,6 +55,9 @@ pruebas.
    arriba y `SLACK_SIGNING_SECRET` esta puesto.
 3. **Subscribe to bot events**, agrega `message.channels`. Para canales
    privados tambien agrega `message.groups` + scopes `groups:history`/`groups:read`.
+   Agrega tambien `member_joined_channel`: sin este evento, Coordina igual
+   sincroniza el padron del canal (nombres reales de cada integrante) en
+   cada mensaje nuevo, pero no apenas alguien se une sin haber escrito nada.
 4. Guarda. Si Slack pide reinstalar el app (banner amarillo), hazlo.
 
 En produccion, `/api/channels/slack/events` no usa una cuenta del panel: la

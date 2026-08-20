@@ -53,28 +53,36 @@ def _channel(client, session_id, sender, sender_id, text, message_id, mentioned=
 
 
 def test_requirements_endpoint(client):
+    # El endpoint del panel solo marca "requerido": la prioridad queda
+    # reservada al comando de WhatsApp gateado a coordinadores (ver
+    # test_requirement_command_gated_to_coordinators), asi que no se puede
+    # setear desde aca.
     session_id = _create_session(client)
     client.post(f"/api/sessions/{session_id}/participants", json={"name": "Ana"})
     response = client.post(
         f"/api/sessions/{session_id}/participants/requirements",
-        json={"name": "Ana", "required": True, "priority": 3},
+        json={"name": "Ana", "required": True},
     )
     assert response.status_code == 200
     participant = response.json()["session"]["participants"][0]
     assert participant["required"] is True
-    assert participant["priority"] == 3
+    assert participant["priority"] == 0
 
 
 def test_requirements_endpoint_partial_update(client):
     session_id = _create_session(client)
     client.post(f"/api/sessions/{session_id}/participants", json={"name": "Ana"})
+    client.post(
+        f"/api/sessions/{session_id}/participants/requirements",
+        json={"name": "Ana", "required": True},
+    )
     response = client.post(
         f"/api/sessions/{session_id}/participants/requirements",
-        json={"name": "Ana", "priority": 5},
+        json={"name": "Ana"},
     )
     participant = response.json()["session"]["participants"][0]
-    assert participant["required"] is False
-    assert participant["priority"] == 5
+    # Sin "required" en el payload, no toca el valor ya guardado.
+    assert participant["required"] is True
 
 
 def test_no_habitual_reply_when_no_history(client):
@@ -149,3 +157,18 @@ def test_habitual_slot_flow_with_confirmation(client):
 def _create_session(client):
     response = client.post("/api/sessions", json={"title": "Reunion"})
     return response.json()["session"]["id"]
+
+
+def test_help_command_documents_requirement_and_priority_commands(client):
+    """La ayuda se quedo atras cuando se agregaron requerido/prioridad/normal
+    y confirmar-igual: los mencionaba en el codigo pero no en `@coordina
+    ayuda`. Este test fija que toda palabra clave que classify_channel_command
+    reconoce quede documentada."""
+    session_id = _resolve_group(client)
+    response = _channel(client, session_id, "Jefe", "jefe@s.whatsapp.net", "@coordina ayuda", "help1")
+    reply = response.json()["agent_reply"]
+
+    for keyword in ["confirmar", "confirmar igual", "cancela", "resumen", "faltan", "exportar", "quita a", "reinicia"]:
+        assert keyword in reply, f"falta '{keyword}' en la ayuda"
+    for keyword in ["requerido", "prioridad", "normal"]:
+        assert keyword in reply, f"falta el comando '{keyword}' en la ayuda"

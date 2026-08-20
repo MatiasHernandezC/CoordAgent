@@ -10,7 +10,7 @@ import os
 import pytest
 
 import app.services.google_calendar_service as gcal_module
-from app.schemas import Participant, Session, TimeOption
+from app.schemas import ChannelConfig, Participant, Session, TimeOption
 from app.services.google_calendar_service import (
     GoogleCalendarApiError,
     GoogleCalendarConfigError,
@@ -46,8 +46,8 @@ def service(tmp_path, monkeypatch, master_key):
     return GoogleCalendarService()
 
 
-def _confirmed_session() -> Session:
-    session = Session(title="Reunion")
+def _confirmed_session(group_name: str | None = None) -> Session:
+    session = Session(title="Reunion", channel_config=ChannelConfig(group_name=group_name))
     session.participants = [Participant(name="Camila")]
     option = TimeOption(
         day="lunes",
@@ -184,6 +184,36 @@ def test_create_event_posts_with_refreshed_access_token(service, monkeypatch):
     assert result == {"id": "evt-1", "htmlLink": "https://calendar.google.com/event?eid=evt-1"}
     event_call = next(call for call in calls if call[0] == gcal_module.EVENTS_ENDPOINT)
     assert event_call[3]["Authorization"] == "Bearer fresh-token"
+
+
+def test_create_event_uses_group_title_and_stable_color(service, monkeypatch):
+    url = service.authorization_url()
+    state = url.split("state=")[1].split("&")[0]
+    monkeypatch.setattr(
+        gcal_module.requests,
+        "post",
+        lambda *a, **k: FakeResponse({"refresh_token": "rt", "access_token": "at"}),
+    )
+    monkeypatch.setattr(gcal_module.requests, "get", lambda *a, **k: FakeResponse({"email": "a@b.com"}))
+    service.handle_callback("code", state)
+
+    bodies = []
+
+    def fake_post(endpoint, data=None, json=None, headers=None, timeout=None, **kwargs):
+        if endpoint == gcal_module.TOKEN_ENDPOINT:
+            return FakeResponse({"access_token": "fresh-token"})
+        bodies.append(json)
+        return FakeResponse({"id": "evt-1", "htmlLink": "https://calendar.google.com/event?eid=evt-1"})
+
+    monkeypatch.setattr(gcal_module.requests, "post", fake_post)
+
+    service.create_event(_confirmed_session(group_name="Finanzas"))
+    service.create_event(_confirmed_session(group_name="Finanzas"))
+
+    finanzas_body_1, finanzas_body_2 = bodies
+    assert finanzas_body_1["summary"] == "Reunion de Finanzas"
+    assert finanzas_body_1["colorId"] == finanzas_body_2["colorId"]  # mismo grupo -> mismo color
+    assert finanzas_body_1["colorId"] in {str(i) for i in range(1, 12)}
 
 
 def test_create_event_raises_on_api_error(service, monkeypatch):

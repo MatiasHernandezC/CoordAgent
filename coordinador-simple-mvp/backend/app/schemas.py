@@ -54,6 +54,11 @@ class Participant(BaseModel):
     required: bool = False
     # Peso de prioridad para el score de opciones (ej. el jefe). 0 = peso 1.
     priority: int = 0
+    # Se creo desde el padron del canal (Slack/WhatsApp) antes de que la
+    # persona escribiera algo. Mientras siga en True y sin disponibilidad, no
+    # se le nombra en "falta disponibilidad" (ver find_missing_info): recien
+    # se vinculo el canal, nombrar a todo el padron uno por uno seria ruido.
+    roster_only: bool = False
 
 
 class AvailabilityRemoval(BaseModel):

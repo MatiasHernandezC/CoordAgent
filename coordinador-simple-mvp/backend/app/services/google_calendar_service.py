@@ -7,6 +7,7 @@ siempre (link + .ics). REST directo con requests, sin google-api-python-client.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import time
@@ -16,7 +17,7 @@ from urllib.parse import urlencode
 import requests
 
 from app.schemas import Session
-from app.services.calendar_export import session_event_datetimes
+from app.services.calendar_export import event_description, event_title, session_event_datetimes
 from app.services.credential_crypto import (
     CredentialEncryptionError,
     decode_master_key,
@@ -41,6 +42,23 @@ SCOPE = "https://www.googleapis.com/auth/calendar.events"
 # compartido es solo un nombre historico, no describe este contenido.
 CREDENTIAL_ID = "google-calendar:default"
 STATE_TTL_SECONDS = 600
+
+# Paleta de "event colors" de Google Calendar (colorId 1-11: Lavanda, Salvia,
+# Uva, Flamenco, Banana, Mandarina, Pavo real, Grafito, Arandano, Albahaca,
+# Tomate). No hay endpoint para pedir "el color del grupo X"; se deriva un
+# colorId estable por hash para que cada grupo siempre caiga en el mismo color.
+_EVENT_COLOR_IDS = [str(i) for i in range(1, 12)]
+
+
+def _color_id_for_group(session: Session) -> str:
+    identifier = (
+        session.channel_config.group_jid
+        or session.channel_config.group_name
+        or session.title
+        or session.id
+    )
+    digest = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
+    return _EVENT_COLOR_IDS[int(digest, 16) % len(_EVENT_COLOR_IDS)]
 
 
 class GoogleCalendarConfigError(RuntimeError):
@@ -139,10 +157,10 @@ class GoogleCalendarService:
 
         access_token = self._refresh_access_token(record)
         start_at, end_at = session_event_datetimes(session)
-        available = ", ".join(session.selected_option.available_participants) or "por confirmar"
         body = {
-            "summary": session.channel_config.group_name or session.title or "Reunion",
-            "description": f"Coordinado con Coordina. Asisten: {available}.",
+            "summary": event_title(session),
+            "description": event_description(session, session.selected_option),
+            "colorId": _color_id_for_group(session),
             "start": {"dateTime": start_at.isoformat(), "timeZone": start_at.tzinfo.key if hasattr(start_at.tzinfo, "key") else str(start_at.tzinfo)},
             "end": {"dateTime": end_at.isoformat(), "timeZone": end_at.tzinfo.key if hasattr(end_at.tzinfo, "key") else str(end_at.tzinfo)},
         }

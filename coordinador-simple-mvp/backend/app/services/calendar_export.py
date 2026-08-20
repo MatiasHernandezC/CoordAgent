@@ -71,6 +71,28 @@ def format_long_date(value: date) -> str:
     return f"{value.day} de {MONTHS[value.month - 1]}"
 
 
+def event_title(session: Session) -> str:
+    """Titulo del evento con referencia explicita al grupo de origen."""
+    group_name = session.channel_config.group_name
+    if group_name:
+        return f"Reunion de {group_name}"
+    return session.title or "Reunion de coordinacion"
+
+
+def event_description(session: Session, option: TimeOption) -> str:
+    group_name = session.channel_config.group_name or session.title or "el grupo"
+    available = ", ".join(option.available_participants) or "por confirmar"
+    unavailable = ", ".join(option.unavailable_participants)
+    lines = [
+        f"Coordinado automaticamente por Coordina para {group_name}.",
+        f"Asisten: {available}.",
+    ]
+    if unavailable:
+        lines.append(f"No calzan: {unavailable}.")
+    lines.append(f"Cobertura: {option.coverage_percent}%.")
+    return "\n".join(lines)
+
+
 def build_google_calendar_url(session: Session, now: datetime | None = None) -> str:
     """Link 'Agregar a Google Calendar' clickeable directo desde WhatsApp."""
     option = session.selected_option
@@ -81,13 +103,12 @@ def build_google_calendar_url(session: Session, now: datetime | None = None) -> 
     tz_name = snapshot.timezone
     start_at, end_at = session_event_datetimes(session, now)
 
-    available = ", ".join(option.available_participants) or "por confirmar"
     params = {
         "action": "TEMPLATE",
-        "text": session.channel_config.group_name or session.title or "Reunion",
+        "text": event_title(session),
         "dates": f"{start_at.strftime('%Y%m%dT%H%M%S')}/{end_at.strftime('%Y%m%dT%H%M%S')}",
         "ctz": tz_name,
-        "details": f"Coordinado con Coordina. Asisten: {available}.",
+        "details": event_description(session, option),
     }
     return "https://calendar.google.com/calendar/render?" + urlencode(params)
 
@@ -101,14 +122,7 @@ def build_calendar_ics(session: Session, now: datetime | None = None) -> str:
     tz_name = snapshot.timezone
     start_at, end_at = session_event_datetimes(session, now)
 
-    available = ", ".join(option.available_participants) or "Sin participantes confirmados"
-    unavailable = ", ".join(option.unavailable_participants) or "Sin conflictos registrados"
-    description = (
-        f"Decision confirmada por Coordina.\n"
-        f"Asisten: {available}.\n"
-        f"No calzan: {unavailable}.\n"
-        f"Cobertura: {option.coverage_percent}%."
-    )
+    description = event_description(session, option)
 
     lines = [
         "BEGIN:VCALENDAR",
@@ -121,7 +135,7 @@ def build_calendar_ics(session: Session, now: datetime | None = None) -> str:
         f"DTSTAMP:{parse_datetime(snapshot.dtstamp).astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
         f"DTSTART;TZID={tz_name}:{start_at.strftime('%Y%m%dT%H%M%S')}",
         f"DTEND;TZID={tz_name}:{end_at.strftime('%Y%m%dT%H%M%S')}",
-        f"SUMMARY:{escape_text(session.channel_config.group_name or session.title)}",
+        f"SUMMARY:{escape_text(event_title(session))}",
         f"DESCRIPTION:{escape_text(description)}",
         "END:VEVENT",
         "END:VCALENDAR",

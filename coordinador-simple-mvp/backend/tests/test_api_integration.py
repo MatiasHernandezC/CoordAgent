@@ -733,6 +733,21 @@ def test_group_coverage_uses_real_roster_and_blocks_false_consensus(client):
     assert any("2 integrante" in item for item in body["session"]["missing_info"])
     assert "Aun no se puede confirmar" in (body["agent_reply"] or "")
 
+    blocked = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Ana", "sender_id": "ana@wa", "text": "@coordina confirmar"},
+    ).json()
+    assert "No puedo confirmar todavia" in (blocked["agent_reply"] or "")
+    assert "confirmar igual" in (blocked["agent_reply"] or "")
+    assert blocked["session"]["selected_option"] is None
+
+    forced = client.post(
+        f"/api/sessions/{session_id}/channel/messages",
+        json={"sender": "Ana", "sender_id": "ana@wa", "text": "@coordina confirmar igual"},
+    ).json()
+    assert forced["session"]["status"] == "confirmed"
+    assert forced["session"]["selected_option"]["id"] == body["session"]["options"][0]["id"]
+
 
 def test_any_group_member_can_run_all_coordination_commands_with_simple_confirmation(client):
     session_id = _create(client, "Grupo colaborativo")

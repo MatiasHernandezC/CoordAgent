@@ -151,7 +151,16 @@ def find_missing_info(session: Session) -> list[str]:
     if not session.participants:
         missing.append("Agrega participantes o escribe un mensaje con disponibilidades.")
 
+    identified = 0
     for participant in session.participants:
+        if participant.roster_only and not participant.availability and not participant.required:
+            # Se conoce el nombre por el padron del canal (Slack/WhatsApp),
+            # pero la persona todavia no escribio nada: no se la nombra una
+            # por una (seria ruido apenas se vincula el canal), cae en el
+            # total generico de "sin identificar" de abajo, igual que antes
+            # de que existiera el padron.
+            continue
+        identified += 1
         if not participant.availability:
             if participant.required:
                 missing.append(f"Falta disponibilidad de {participant.name} (participante requerido).")
@@ -162,7 +171,7 @@ def find_missing_info(session: Session) -> list[str]:
         session.channel_config.group_participant_count or 0,
         len(session.channel_config.group_participant_ids),
     )
-    unidentified = max(expected_participants - len(session.participants), 0)
+    unidentified = max(expected_participants - identified, 0)
     if unidentified:
         missing.append(
             f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo."

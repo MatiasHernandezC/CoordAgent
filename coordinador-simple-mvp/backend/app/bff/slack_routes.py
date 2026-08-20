@@ -32,6 +32,19 @@ from app.settings import settings
 router = APIRouter()
 logger = logging.getLogger("app.slack")
 
+# Estas fuentes son respuestas a comandos/ecos (ayuda, reinicia, requerido,
+# reproduccion idempotente de un webhook duplicado), no la propuesta de
+# horarios en si. Antes se les adjuntaban los botones de "confirmar" igual
+# que a la propuesta real: cualquier mensaje mientras hubiera una propuesta
+# sin confirmar (incluido "@coordina ayuda") volvia a mostrar los botones,
+# como si el bot ignorara todo lo que no fuera confirmar una opcion.
+_NON_PROPOSAL_LLM_SOURCES = {
+    "channel_command",
+    "channel_no_habitual_slot",
+    "idempotent_replay",
+    "idempotent_recovery",
+}
+
 
 @router.post("/events")
 async def slack_events(request: Request):
@@ -205,7 +218,11 @@ def _sync_joined_channel(channel_id: str, bot_user_id: str | None) -> None:
 def _deliver(channel_id: str, result) -> None:
     try:
         if result.agent_reply:
-            blocks = build_confirm_option_blocks(result.session)
+            blocks = (
+                None
+                if result.llm_source in _NON_PROPOSAL_LLM_SOURCES
+                else build_confirm_option_blocks(result.session)
+            )
             post_message(channel_id, result.agent_reply, blocks)
         if result.agent_reply_image:
             upload_file(

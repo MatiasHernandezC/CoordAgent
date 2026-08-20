@@ -19,9 +19,9 @@ import app.bff.slack_routes as slack_routes
 import app.services.session_service as session_module
 import app.services.slack_channel as slack_channel
 from app.main import app
-from app.schemas import Session
+from app.schemas import ParticipantRosterEntry, Session
 from app.services.llm_service import llm_service
-from app.services.slack_channel import SlackApiError, upload_file, verify_slack_signature
+from app.services.slack_channel import SlackApiError, resolve_channel_roster, upload_file, verify_slack_signature
 from app.settings import settings
 from app.storage.json_repository import JsonRepository
 
@@ -224,6 +224,61 @@ def test_slack_events_full_flow_creates_session_and_replies(client, monkeypatch)
     assert sessions[0]["channel_config"]["group_name"] == "#equipo"
 
 
+def test_slack_events_hydrates_roster_without_naming_silent_members(client, monkeypatch):
+    """El padron del canal (conversations.members) se sincroniza en cada
+    mensaje: los miembros que todavia no escribieron no deben aparecer
+    nombrados uno por uno en missing_info, y quien si escribe debe quedar con
+    su nombre real (no el placeholder que le puso el padron)."""
+    monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
+    monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#equipo")
+    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: None)
+    monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: None)
+    monkeypatch.setattr(
+        slack_routes,
+        "resolve_channel_roster",
+        lambda channel_id, bot_user_id=None: {
+            "participant_count": 2,
+            "participant_ids": ["U123", "U456"],
+            "coordinator_ids": [],
+            "participant_roster": [
+                ParticipantRosterEntry(id="U123", name="Camila"),
+                ParticipantRosterEntry(id="U456", name="Nicolas"),
+            ],
+        },
+    )
+
+    response = _post_event(
+        client,
+        {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "channel": "C123",
+                "user": "U123",
+                "text": "Yo puedo lunes en la tarde @coordina",
+                "ts": "1700000000.000100",
+                "channel_type": "channel",
+            },
+        },
+    )
+    assert response.status_code == 200
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+    names = {p["name"] for p in session["participants"]}
+    assert names == {"Camila", "Nicolas"}
+
+    camila = next(p for p in session["participants"] if p["name"] == "Camila")
+    assert camila["roster_only"] is False
+    assert camila["availability"]
+
+    nicolas = next(p for p in session["participants"] if p["name"] == "Nicolas")
+    assert nicolas["roster_only"] is True
+    assert nicolas["availability"] == []
+
+    # Nicolas no escribio nada todavia: no debe salir nombrado en missing_info.
+    assert not any("Nicolas" in item for item in session["missing_info"])
+
+
 def test_slack_events_duplicate_ts_is_idempotent(client, monkeypatch):
     sent = []
     monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
@@ -355,6 +410,29 @@ class _FakeResponse:
         return self._payload
 
 
+def test_resolve_channel_roster_returns_participant_roster_entries(monkeypatch):
+    """Bug real: devolvia dicts sueltos, y hydrate_participant_roster espera
+    ParticipantRosterEntry (accede a .id/.name). Con red real disponible
+    (produccion), esto reventaba silenciosamente cada mensaje de Slack apenas
+    la sincronizacion del padron funcionaba (se ve en el intercept de abajo)."""
+    monkeypatch.setattr(settings, "slack_bot_token", "xoxb-test-token")
+    monkeypatch.setattr(slack_channel, "resolve_display_name", lambda user_id: f"Nombre {user_id}")
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        assert url.endswith("/conversations.members")
+        return _FakeResponse(
+            {"ok": True, "members": ["U123", "U456", "UBOT"], "response_metadata": {"next_cursor": ""}}
+        )
+
+    monkeypatch.setattr(slack_channel.requests, "get", fake_get)
+
+    roster = resolve_channel_roster("C123", bot_user_id="UBOT")
+
+    assert roster["participant_count"] == 2
+    assert all(isinstance(entry, ParticipantRosterEntry) for entry in roster["participant_roster"])
+    assert {entry.id for entry in roster["participant_roster"]} == {"U123", "U456"}
+
+
 def test_upload_file_uses_three_step_external_flow(monkeypatch):
     monkeypatch.setattr(settings, "slack_bot_token", "xoxb-test-token")
     calls = []
@@ -409,6 +487,7 @@ def test_deliver_attaches_confirm_option_blocks(client, monkeypatch):
         agent_reply = "Coordina: elige una opcion"
         agent_reply_image = None
         agent_reply_document = None
+        llm_source = "gemini"
 
     result = _FakeResult()
     result.session = session
@@ -419,6 +498,32 @@ def test_deliver_attaches_confirm_option_blocks(client, monkeypatch):
     assert blocks is not None
     values = [json.loads(el["value"]) for el in blocks[0]["elements"]]
     assert values[0] == {"sid": session_id, "oid": session_dict["options"][0]["id"], "rev": session_dict["proposal_revision"]}
+
+
+def test_deliver_omits_blocks_for_command_replies(client, monkeypatch):
+    """El bug real: '@coordina ayuda' (y reinicia/idempotente) volvia a
+    mostrar los botones de confirmar como si fuera la propuesta, aunque
+    hubiera una propuesta pendiente. Solo la propuesta real debe llevarlos."""
+    session_id, session_dict = _prepare_slack_group_with_options(client)
+    session = Session.model_validate(session_dict)
+
+    sent = []
+    monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: sent.append((channel, text, blocks)))
+
+    class _FakeResult:
+        session = None
+        agent_reply = "Coordina: esto es ayuda"
+        agent_reply_image = None
+        agent_reply_document = None
+        llm_source = "channel_command"
+
+    result = _FakeResult()
+    result.session = session
+    slack_routes._deliver("C123", result)
+
+    assert len(sent) == 1
+    _channel, _text, blocks = sent[0]
+    assert blocks is None
 
 
 def test_block_action_bad_signature_rejected(client):

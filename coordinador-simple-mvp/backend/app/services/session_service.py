@@ -330,7 +330,13 @@ class SessionService:
             )
             if existing:
                 merge_participant_identity(existing, participant_identity_ids(incoming))
-                if is_generated_contact_name(existing.name) and not is_generated_contact_name(incoming.name):
+                # La persona acaba de escribir: ya no es solo un registro del
+                # padron, y si el nombre que tenia era un placeholder (del
+                # padron o de una mencion sin resolver), se reemplaza por el
+                # nombre real que trajo el mensaje.
+                existing.roster_only = False
+                was_placeholder = is_generated_contact_name(existing.name) or is_roster_placeholder_name(existing.name)
+                if was_placeholder and not is_generated_contact_name(incoming.name):
                     existing.name = incoming.name
                 # Si el existente ya tiene nombre humano y la extraccion trae
                 # solo el placeholder de mencion numerica, se conserva el nombre.
@@ -547,6 +553,7 @@ class SessionService:
         external_id: str | None = None,
         now: datetime | None = None,
         expected_proposal_revision: int | None = None,
+        force: bool = False,
     ) -> Session:
         session = self.get(session_id)
         if expected_proposal_revision is not None and expected_proposal_revision != session.proposal_revision:
@@ -575,7 +582,7 @@ class SessionService:
                 )
                 return repository.save(session)
             return session
-        blockers = confirmation_blockers(session)
+        blockers = confirmation_blockers(session, ignore_missing_info=force)
         if blockers:
             raise HTTPException(status_code=409, detail=" ".join(blockers))
 
@@ -1145,11 +1152,15 @@ def merge_duplicate_participants(participants: list[Participant]) -> list[Partic
         primary = matching[0]
         primary.availability = merge_slots(primary.availability, participant.availability)
         merge_participant_identity(primary, ids)
+        # Si cualquiera de los dos ya es una persona real (no solo un
+        # registro del padron), el resultado deja de ser "roster_only".
+        primary.roster_only = primary.roster_only and participant.roster_only
         # Un registro puente PN/LID puede conectar duplicados históricos que
         # antes parecían identidades separadas.
         for duplicate in matching[1:]:
             primary.availability = merge_slots(primary.availability, duplicate.availability)
             merge_participant_identity(primary, participant_identity_ids(duplicate))
+            primary.roster_only = primary.roster_only and duplicate.roster_only
             merged.remove(duplicate)
 
     return merged
@@ -1359,12 +1370,23 @@ def is_roster_placeholder_name(name: str) -> bool:
     )
 
 
+# Coincide con el min_length de WhatsAppUserId (schemas.py): un id mas corto
+# nunca es un JID de WhatsApp ni un user id de Slack real, pero puede llegar
+# asi desde un payload malformado. Se descarta en vez de romper la sesion.
+_MIN_EXTERNAL_ID_LEN = 3
+
+
 def hydrate_participant_roster(
     session: Session,
     participant_roster: list[ParticipantRosterEntry] | None,
     participant_ids: list[str] | None,
 ) -> bool:
-    """Crea el padron del grupo antes de que llegue el primer mensaje."""
+    """Crea el padron del grupo antes de que llegue el primer mensaje.
+
+    Los participantes creados aqui quedan marcados `roster_only=True`: se
+    conoce su nombre por el padron del canal (Slack o WhatsApp), pero todavia
+    no escribieron nada. Esto evita que `find_missing_info` los nombre uno por
+    uno apenas se vincula el canal (ver decision_engine.find_missing_info)."""
     if participant_roster is None and participant_ids is None:
         return False
 
@@ -1372,7 +1394,7 @@ def hydrate_participant_roster(
     seen: set[str] = set()
     for entry in participant_roster or []:
         external_id = clean_external_id(entry.id)
-        if not external_id or external_id in seen:
+        if not external_id or len(external_id) < _MIN_EXTERNAL_ID_LEN or external_id in seen:
             continue
         name = (entry.name or "").strip() or roster_name_for_external_id(external_id)
         entries.append((external_id, name))
@@ -1380,7 +1402,7 @@ def hydrate_participant_roster(
 
     for external_id in participant_ids or []:
         clean_id = clean_external_id(external_id)
-        if clean_id and clean_id not in seen:
+        if clean_id and len(clean_id) >= _MIN_EXTERNAL_ID_LEN and clean_id not in seen:
             entries.append((clean_id, roster_name_for_external_id(clean_id)))
             seen.add(clean_id)
 
@@ -1400,7 +1422,7 @@ def hydrate_participant_roster(
             continue
 
         session.participants.append(
-            Participant(name=name, external_id=external_id, external_ids=[external_id])
+            Participant(name=name, external_id=external_id, external_ids=[external_id], roster_only=True)
         )
         changed = True
 
@@ -1456,11 +1478,14 @@ def validate_slot_in_session_window(session: Session, slot: TimeSlot) -> None:
         )
 
 
-def confirmation_blockers(session: Session) -> list[str]:
+def confirmation_blockers(session: Session, *, ignore_missing_info: bool = False) -> list[str]:
     blockers: list[str] = []
     if session.archived_at:
         blockers.append("La sesion esta archivada.")
-    if session.missing_info:
+    # ignore_missing_info: "confirmar igual" del coordinador. Solo salta este
+    # blocker puntual (brecha de gente que nunca respondio); las protecciones
+    # de datos ambiguos/dudosos y de requeridos siguen aplicando siempre.
+    if session.missing_info and not ignore_missing_info:
         blockers.append("Falta informacion del grupo antes de confirmar.")
     processing = session.last_processing
     identity_flags = set(processing.quality_flags) if processing else set()
@@ -1730,12 +1755,19 @@ def build_help_reply(session: Session) -> str:
             "*Comandos*",
             f"- *{trigger}*  ·  propone los mejores horarios",
             f"- *{trigger} confirmar* (o _confirmar 2_)  ·  cierra la decision y envia el evento al calendario",
+            f"- *{trigger} confirmar igual*  ·  confirma aunque falte gente por identificar (no salta otras protecciones)",
             f"- *{trigger} cancela*  ·  deshace la decision confirmada",
             f"- *{trigger} resumen*  ·  estado actual y opciones",
             f"- *{trigger} faltan*  ·  quienes no han dado su horario",
             f"- *{trigger} exportar*  ·  reporte de la sesion",
             f"- *{trigger} quita a @contacto*  ·  elimina exactamente a la persona mencionada",
             f"- *{trigger} reinicia historial*  ·  comienza otra coordinacion sin usar datos anteriores",
+            f"- *{trigger} ayuda*  ·  este mensaje",
+            "",
+            "*Requeridos y prioridad* (solo coordinadores del grupo)",
+            f"- *{trigger} requerido a @contacto*  ·  esa persona debe estar si o si; las opciones que no la incluyan no se recomiendan",
+            f"- *{trigger} prioridad a @contacto 5*  ·  peso 0-10 para ordenar las opciones (ej. el jefe)",
+            f"- *{trigger} normal a @contacto*  ·  le quita lo de requerido y la prioridad",
             "",
             "*Formato de respuesta*",
             f"- *{trigger} con imagen*  ·  incluye el calendario grafico",
@@ -2034,12 +2066,17 @@ def classify_channel_command(session: Session) -> dict | None:
     ):
         revision_match = re.search(r"\br\s*(\d+)\b", command_text)
         revision = int(revision_match.group(1)) if revision_match else None
+        # "confirmar igual/de todos modos/aunque falte(n)": el coordinador
+        # decide avanzar aunque no todos hayan respondido. No salta las demas
+        # protecciones (menciones ambiguas, requeridos sin cubrir, etc.).
+        force = bool(re.search(r"\b(igual|de todos modos|aunque falte\w*|forzar|forzado)\b", command_text))
         if not number_token:
             return {
                 "name": "confirm",
                 "option_index": 1,
                 "option_label": "1",
                 "proposal_revision": revision,
+                "force": force,
             }
 
         option_label = number_token.group(1)
@@ -2050,6 +2087,7 @@ def classify_channel_command(session: Session) -> dict | None:
             "option_index": option_index,
             "option_label": option_label,
             "proposal_revision": revision,
+            "force": force,
         }
 
     if re.search(r"\b(cancelar|cancela|cancelen|anular|anula|deshacer|deshaz)\b", command_text):
