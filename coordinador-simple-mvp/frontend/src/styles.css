@@ -185,13 +185,8 @@ p {
 .brand-mark {
   width: 34px;
   height: 34px;
-  display: grid;
-  place-items: center;
   flex: 0 0 auto;
-  border-radius: 8px;
-  background: #0f6b5b;
-  color: #ffffff;
-  font-weight: 950;
+  object-fit: contain;
 }
 
 .login-form {

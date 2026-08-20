@@ -1,3 +1,5 @@
+<img src="docs/logo.png" alt="Coordina" width="120" />
+
 # Coordina WhatsApp MVP
 
 Panel y bot liviano para coordinar horarios desde grupos de WhatsApp. El sistema

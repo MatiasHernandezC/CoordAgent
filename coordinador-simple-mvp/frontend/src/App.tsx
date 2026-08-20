@@ -611,7 +611,7 @@ export function App() {
     return (
       <main className="auth-page">
         <section className="auth-card narrow">
-          <div className="brand-mark">C</div>
+          <img className="brand-mark" src="/logo.png" alt="Coordina" />
           <h1>Verificando acceso</h1>
           <p>Conectando con la API protegida.</p>
         </section>
@@ -625,7 +625,7 @@ export function App() {
         <section className="auth-card">
           <div className="auth-intro">
             <div className="brand-line">
-              <div className="brand-mark">C</div>
+              <img className="brand-mark" src="/logo.png" alt="Coordina" />
               <span>Coordina</span>
             </div>
             <h1>{authMode === "login" ? "Acceso al panel" : "Crea tu cuenta"}</h1>
@@ -690,7 +690,7 @@ export function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-line">
-          <div className="brand-mark">C</div>
+          <img className="brand-mark" src="/logo.png" alt="Coordina" />
           <div>
             <strong>Coordina</strong>
             <span>{session ? `${channelLabel(session)} · ${sessionDisplayName(session)}` : "Panel operativo"}</span>
