@@ -24,9 +24,11 @@ def _requirement_profile(session: Session) -> tuple[dict[str, int], set[str]]:
 
 
 def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
-    # Diversifica: un solo bloque (el mejor) por (semana, dia). Asi la misma
-    # persona en dias/semanas distintos no genera opciones redundantes, y dos
-    # semanas no colisionan. Ante empate de score se conserva el mas temprano.
+    # Diversifica por conjunto de asistentes dentro de cada (semana, dia).
+    # Asi no se repiten diez horas equivalentes con las mismas personas, pero
+    # tampoco se descarta una alternativa de mayor cobertura solo porque el
+    # mejor bloque del dia ya fue seleccionado. Ante empate se conserva la
+    # hora mas temprana para ese mismo conjunto de asistentes.
     #
     # Requeridos: si existe al menos una celda que los cubre a todos, SOLO se
     # recomiendan celdas con required_met True. Si ninguna los cubre (fallback),
@@ -44,11 +46,11 @@ def options_from_matrix(matrix: list[AvailabilityCell]) -> list[TimeOption]:
     else:
         pool = scorable
 
-    best_by_slot: dict[tuple[int, str], AvailabilityCell] = {}
+    best_by_slot: dict[tuple[int, str, tuple[str, ...]], AvailabilityCell] = {}
     for cell in pool:
         if cell.score == 0:
             continue
-        key = (cell.week_offset, cell.day)
+        key = (cell.week_offset, cell.day, tuple(sorted(cell.available_participants)))
         best = best_by_slot.get(key)
         if best is None or (cell.weighted_score, cell.score) > (best.weighted_score, best.score):
             best_by_slot[key] = cell
@@ -152,13 +154,13 @@ def find_missing_info(session: Session) -> list[str]:
         missing.append("Agrega participantes o escribe un mensaje con disponibilidades.")
 
     identified = 0
+    roster_missing_names: list[str] = []
     for participant in session.participants:
         if participant.roster_only and not participant.availability and not participant.required:
-            # Se conoce el nombre por el padron del canal (Slack/WhatsApp),
-            # pero la persona todavia no escribio nada: no se la nombra una
-            # por una (seria ruido apenas se vincula el canal), cae en el
-            # total generico de "sin identificar" de abajo, igual que antes
-            # de que existiera el padron.
+            # El padron ya entrego un nombre util: se informa quien falta,
+            # pero se mantiene fuera de "identified" porque aun no entrego
+            # disponibilidad.
+            roster_missing_names.append(participant.name)
             continue
         identified += 1
         if not participant.availability:
@@ -173,9 +175,21 @@ def find_missing_info(session: Session) -> list[str]:
     )
     unidentified = max(expected_participants - identified, 0)
     if unidentified:
-        missing.append(
-            f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo."
-        )
+        visible_names = roster_missing_names[:unidentified]
+        if visible_names:
+            if len(visible_names) == 1:
+                names = visible_names[0]
+            elif len(visible_names) == 2:
+                names = f"{visible_names[0]} y {visible_names[1]}"
+            else:
+                names = f"{', '.join(visible_names[:-1])} y {visible_names[-1]}"
+            missing.append(
+                f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo: {names}."
+            )
+        else:
+            missing.append(
+                f"Falta identificar la disponibilidad de {unidentified} integrante(s) del grupo."
+            )
 
     return missing
 

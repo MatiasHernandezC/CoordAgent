@@ -29,10 +29,13 @@ import {
   listSessions,
   removeParticipant,
   registerUser,
+  resetPanelUserPassword,
   reopenSession,
   saveAuth,
   sendChannelBatch,
   testLlmKey,
+  transferSessionOwner,
+  updatePanelUser,
   updateLlmKey,
   updateReplyFormat,
   ApiError,
@@ -41,6 +44,7 @@ import {
 import { CHANNEL_EXAMPLE } from "./constants";
 import { GeminiKeyPanel } from "./components/GeminiKeyPanel";
 import { GoogleCalendarPanel } from "./components/GoogleCalendarPanel";
+import { UserManagementPanel } from "./components/UserManagementPanel";
 import { getErrorMessage } from "./format";
 import type { AppUser, Day, GoogleCalendarStatus, LlmKeyListResponse, OpsStatus, ReplyFormat, RuntimeInfo, Session } from "./types";
 
@@ -379,6 +383,34 @@ export function App() {
       const response = await assignSessionUsers(session.id, next);
       setSession(response.session);
       await refreshSessions(response.session.id);
+    });
+  }
+
+  async function handleUpdatePanelUser(username: string, updates: { display_name?: string; active?: boolean }) {
+    await runAction("Actualizando usuario...", async () => {
+      const response = await updatePanelUser(username, updates);
+      if (currentUser?.username === username) setCurrentUser(response.user);
+      await refreshUsers();
+    });
+  }
+
+  async function handleResetPanelUserPassword(username: string, password: string) {
+    await runAction("Restableciendo contraseña...", async () => {
+      await resetPanelUserPassword(username, password);
+      if (currentUser?.username === username) {
+        saveAuth({ username, password });
+      }
+      await refreshUsers();
+    });
+  }
+
+  async function handleTransferSessionOwner(username: string) {
+    if (!session) return;
+    await runAction("Transfiriendo propiedad del grupo...", async () => {
+      const response = await transferSessionOwner(session.id, username);
+      setSession(response.session);
+      await refreshSessions(response.session.id);
+      await refreshUsers();
     });
   }
 
@@ -1201,14 +1233,17 @@ export function App() {
               <label>Contraseña<input type="password" minLength={10} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
               <button type="submit" disabled={isBusy || newUsername.trim().length < 2 || newDisplayName.trim().length < 2 || newPassword.length < 10}>Crear usuario</button>
             </form>
-            <div className="access-list">
-              <span className="access-list-title">Acceso a {session ? sessionDisplayName(session) : "un grupo"}</span>
-              {users.filter((user) => !user.is_admin).map((user) => <label className="access-user" key={user.username}>
-                <input type="checkbox" checked={Boolean(session?.assigned_usernames.includes(user.username))} disabled={isBusy || !session} onChange={() => handleToggleSessionUser(user.username)} />
-                <span><strong>{user.display_name}</strong><small>@{user.username}</small></span>
-              </label>)}
-              {!users.some((user) => !user.is_admin) ? <div className="empty-state">Crea el primer usuario para asignarle este grupo.</div> : null}
-            </div>
+            {currentUser ? <UserManagementPanel
+              users={users}
+              sessions={sessions}
+              currentUser={currentUser}
+              selectedSession={session}
+              busy={isBusy}
+              onUpdateUser={handleUpdatePanelUser}
+              onResetPassword={handleResetPanelUserPassword}
+              onToggleAccess={handleToggleSessionUser}
+              onTransferOwner={handleTransferSessionOwner}
+            /> : null}
           </section> : null}
 
           {isAdmin ? <>

@@ -29,6 +29,7 @@ from app.schemas import (
     RuntimeInfo,
     ResolveChannelGroupRequest,
     TimeSlot,
+    TransferSessionOwnerRequest,
     UpdateLlmKeyRequest,
 )
 from app.settings import settings
@@ -44,7 +45,7 @@ from app.services.habitual_time import detect_habitual_phrase
 from app.services.llm_service import LlmUnavailableError, has_extractable_scheduling_signal, llm_service
 from app.services.llm_key_service import llm_key_service
 from app.services.ops_status import fetch_gateway_status
-from app.services.auth_service import auth_service, current_user
+from app.services.auth_service import auth_service, current_user, require_admin_user
 from app.services.session_service import (
     build_cancelled_channel_reply,
     build_channel_caption,
@@ -273,11 +274,35 @@ def get_session(session_id: str, request: Request):
 @router.put("/sessions/{session_id}/access")
 def assign_session_access(session_id: str, payload: AssignSessionUsersRequest):
     normalized = sorted({auth_service.normalize_username(value) for value in payload.usernames})
-    missing = [username for username in normalized if not auth_service.get_user(username)]
+    users = {username: auth_service.get_user(username) for username in normalized}
+    missing = [username for username, user in users.items() if not user]
     if missing:
         raise HTTPException(status_code=400, detail=f"Usuarios inexistentes: {', '.join(missing)}")
+    current = session_service.get(session_id)
+    inactive_added = [
+        username
+        for username, user in users.items()
+        if user and not user.active and username not in current.assigned_usernames
+    ]
+    if inactive_added:
+        raise HTTPException(status_code=400, detail=f"Usuarios inactivos: {', '.join(inactive_added)}")
     with session_service.session_lock(session_id):
         return {"session": session_service.assign_users(session_id, normalized)}
+
+
+@router.put("/sessions/{session_id}/owner")
+def transfer_session_owner(session_id: str, payload: TransferSessionOwnerRequest, request: Request):
+    require_admin_user(request)
+    username = auth_service.normalize_username(payload.username)
+    user = auth_service.get_user(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+    if user.is_admin or user.role != "group_admin":
+        raise HTTPException(status_code=400, detail="El propietario debe ser un administrador de grupo.")
+    if not user.active:
+        raise HTTPException(status_code=400, detail="No puedes transferir un grupo a una cuenta inactiva.")
+    with session_service.session_lock(session_id):
+        return {"session": session_service.transfer_owner(session_id, username)}
 
 
 @router.put("/sessions/{session_id}/chief")

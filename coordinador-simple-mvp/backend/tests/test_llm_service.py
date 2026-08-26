@@ -15,6 +15,7 @@ from app.services.llm_service import (
     current_workday_name,
     estimate_gemini_cost,
     extract_gemini_text,
+    detect_slots,
     merge_extractions,
     normalize_llm_extraction,
     parse_retry_delay_seconds,
@@ -174,7 +175,7 @@ def test_mock_extractor_handles_colon_range_and_free_synonym():
     assert [(slot.day, slot.start, slot.end) for slot in camila.availability] == [("miercoles", "15:00", "17:00")]
 
 
-def test_mock_extractor_handles_free_after_hour_with_short_day():
+def test_mock_extractor_handles_strictly_free_after_hour_with_short_day():
     original_provider = settings.llm_provider
     original_cache = settings.llm_cache_enabled
     try:
@@ -191,7 +192,23 @@ def test_mock_extractor_handles_free_after_hour_with_short_day():
 
     assert source == "mock"
     assert token_usage is None
-    assert [(slot.day, slot.start, slot.end) for slot in beto.availability] == [("jueves", "16:00", "18:00")]
+    assert [(slot.day, slot.start, slot.end) for slot in beto.availability] == [("jueves", "17:00", "18:00")]
+
+
+def test_positive_after_hour_uses_next_full_block_but_from_remains_inclusive():
+    after = detect_slots(
+        "Nicolas puede martes despues de las 9 am pero antes de las 8 pm",
+        workday_start=9,
+        workday_end=22,
+    )
+    from_hour = detect_slots(
+        "Nicolas puede martes desde las 9 am pero antes de las 8 pm",
+        workday_start=9,
+        workday_end=22,
+    )
+
+    assert [(slot.start, slot.end) for slot in after] == [("10:00", "20:00")]
+    assert [(slot.start, slot.end) for slot in from_hour] == [("09:00", "20:00")]
 
 
 def test_mock_extractor_handles_no_me_sirve_range_as_removal():

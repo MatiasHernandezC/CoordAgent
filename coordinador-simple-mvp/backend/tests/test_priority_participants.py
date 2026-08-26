@@ -70,6 +70,34 @@ def test_priority_weight_reorders_top_option():
     assert options[0].weighted_score == 5
 
 
+def test_alternatives_keep_better_coverage_from_same_day_without_duplicates():
+    session = Session(
+        title="retail-ventas-online",
+        participants=[
+            Participant(name="Nicolas", availability=[_slot("martes", "20:00", "21:00")]),
+            Participant(name="Bryan", availability=[_slot("martes", "09:00", "22:00")]),
+            Participant(
+                name="Gabriel",
+                availability=[
+                    _slot("lunes", "11:00", "22:00"),
+                    _slot("martes", "10:00", "22:00"),
+                ],
+            ),
+        ],
+    )
+    session.channel_config.workday_start_hour = 9
+    session.channel_config.workday_end_hour = 22
+
+    options = options_from_matrix(build_availability_matrix(session))
+
+    assert [(option.day, option.start, option.coverage_percent) for option in options] == [
+        ("martes", "20:00", 100),
+        ("martes", "10:00", 67),
+        ("lunes", "11:00", 33),
+    ]
+    assert options[1].available_participants == ["Bryan", "Gabriel"]
+
+
 def test_required_confirmation_blocker():
     session = Session(
         title="t",

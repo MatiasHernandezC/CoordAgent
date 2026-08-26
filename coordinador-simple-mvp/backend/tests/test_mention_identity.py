@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 import app.services.session_service as session_module
 from app.main import app
 from app.schemas import ChannelMessage, ExtractedAvailability, Participant, TimeSlot
-from app.services.llm_service import LlmService, llm_service
+from app.services.llm_service import LlmService, build_channel_identity_display_names, llm_service
 from app.services.session_service import SessionService
 from app.settings import settings
 from app.storage.json_repository import JsonRepository
@@ -157,6 +157,22 @@ def test_real_mention_attributes_third_party_report_to_mentioned_jid(mock_llm: L
         ("Gabo", mentioned_jid)
     ]
     assert "third_party_requires_mention" not in extraction.quality_flags
+
+
+def test_verified_mention_label_is_kept_as_identity_hint():
+    target_jid = "56911111111@s.whatsapp.net"
+    names = build_channel_identity_display_names(
+        [
+            ChannelMessage(
+                sender="Nicolás",
+                sender_id="56922222222@s.whatsapp.net",
+                mentioned_jids=[target_jid],
+                text="@Gabo puede lunes todo el dia",
+            )
+        ]
+    )
+
+    assert names[target_jid] == "Gabo"
 
 
 def test_mention_metadata_cannot_leak_into_a_later_plain_text_message(mock_llm: LlmService):
@@ -609,6 +625,37 @@ def test_old_numeric_contact_label_is_migrated_without_changing_identity(session
     assert migrated.participants[0].external_id == "276514323067118@lid"
     assert migrated.missing_info == ["Falta disponibilidad de Contacto mencionado."]
     assert migrated.last_agent_reply == "Falta disponibilidad de Contacto mencionado."
+
+
+def test_roster_pn_and_message_lid_are_merged_from_explicit_alias_evidence(
+    sessions: SessionService,
+):
+    """Un mismo contacto no debe aparecer como nombre y numero separados."""
+    pn = "56962122151@s.whatsapp.net"
+    lid = "119048071307283@lid"
+    session = sessions.create("Retail ventas")
+    session.participants = [
+        Participant(name="Gabriel", external_id=lid, external_ids=[lid]),
+        Participant(name="+56962122151", external_id=pn, external_ids=[pn], roster_only=True),
+        Participant(name=".", external_id="56988055117@s.whatsapp.net", roster_only=True),
+    ]
+    session.channel_messages = [
+        ChannelMessage(
+            sender="Gabriel",
+            sender_id=lid,
+            sender_aliases=[lid, pn],
+            text="yo puedo martes todo el dia",
+        )
+    ]
+    session_module.repository.save(session)
+
+    migrated = sessions.get(session.id)
+
+    gabriel = [participant for participant in migrated.participants if participant.name == "Gabriel"]
+    assert len(gabriel) == 1
+    assert pn in gabriel[0].external_ids
+    assert not any(participant.name == "+56962122151" for participant in migrated.participants)
+    assert not any(participant.name == "." for participant in migrated.participants)
 
 
 def test_mixed_self_and_plain_third_party_message_is_discarded_entirely(mock_llm: LlmService):

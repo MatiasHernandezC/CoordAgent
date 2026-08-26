@@ -129,6 +129,26 @@ def _normalize_bot_mention(text: str, bot_user_id: str | None) -> str:
     return pattern.sub(settings.slack_trigger_word, text)
 
 
+def _extract_user_mentions(text: str, bot_user_id: str | None = None) -> list[str]:
+    """Identidades verificadas por el marcado nativo ``<@USER_ID>`` de Slack.
+
+    El nombre escrito manualmente (por ejemplo ``@Daniel``) no aparece aqui.
+    La identidad del propio bot se excluye porque solo sirve para invocar a
+    Coordina, no para atribuir disponibilidad a una persona.
+    """
+    bot_identity = (bot_user_id or "").casefold()
+    mentioned: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"<@([^>|\s]+)(?:\|[^>]*)?>", text):
+        user_id = match.group(1).strip()
+        key = user_id.casefold()
+        if not user_id or key == bot_identity or key in seen:
+            continue
+        mentioned.append(user_id)
+        seen.add(key)
+    return mentioned
+
+
 def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
     event_type = event.get("type")
     if event_type == "member_joined_channel":
@@ -141,7 +161,9 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
 
     channel_id = event.get("channel", "")
     user_id = event.get("user", "")
-    text = _normalize_bot_mention((event.get("text") or "").strip(), bot_user_id)
+    raw_text = (event.get("text") or "").strip()
+    mentioned_user_ids = _extract_user_mentions(raw_text, bot_user_id)
+    text = _normalize_bot_mention(raw_text, bot_user_id)
     ts = event.get("ts", "")
     logger.info("slack_event_received channel=%s user=%s ts=%s text=%r", channel_id, user_id, ts, text[:200])
     if not channel_id or not text or not ts:
@@ -170,6 +192,7 @@ def _handle_event(event: dict, bot_user_id: str | None = None) -> None:
                 text,
                 external_id=ts,
                 sender_id=user_id,
+                mentioned_jids=mentioned_user_ids,
             )
             logger.info("slack_message_stored session=%s sender=%s invoked=%s", session.id, sender, invoked)
             if not invoked:

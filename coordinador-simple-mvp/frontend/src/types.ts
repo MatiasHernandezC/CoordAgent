@@ -188,6 +188,8 @@ export type AppUser = {
   display_name: string;
   is_admin: boolean;
   role: "platform_admin" | "group_admin";
+  active: boolean;
+  created_at: string | null;
 };
 
 export type RuntimeInfo = {

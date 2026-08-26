@@ -94,7 +94,7 @@ def test_only_replaces_prior_week_availability(service):
 
     session = merge_payload(service, session.id, payload, "Luisa solo puede viernes despues de las 3")
 
-    assert slots_for(session, "Luisa") == [("viernes", "15:00", "18:00")]
+    assert slots_for(session, "Luisa") == [("viernes", "16:00", "18:00")]
 
 
 def test_stale_decision_is_cleared_when_pipeline_changes_availability(service):

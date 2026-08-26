@@ -70,7 +70,7 @@ def test_torneo_case_manana_is_single_day_not_whole_week(monkeypatch, mock_servi
     by_name = {p.name: [(s.day, s.start, s.end) for s in p.availability] for p in extraction.participants}
     # Un solo dia (jueves), no los 5.
     assert by_name.get("Nicolas") == [("jueves", "17:00", "18:00")]
-    assert by_name.get("Gabo") == [("jueves", "15:00", "18:00")]
+    assert by_name.get("Gabo") == [("jueves", "16:00", "18:00")]
 
 
 def test_channel_transcript_resolves_relative_day(monkeypatch):

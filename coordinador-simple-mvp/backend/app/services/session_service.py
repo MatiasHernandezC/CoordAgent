@@ -132,6 +132,28 @@ class SessionService:
         )
         return repository.save(session)
 
+    def transfer_owner(self, session_id: str, username: str) -> Session:
+        session = self.get(session_id)
+        clean_username = username.strip().lower()
+        previous_owner = session.owner_username
+        assigned = set(session.assigned_usernames)
+        if previous_owner:
+            assigned.discard(previous_owner)
+        assigned.add(clean_username)
+        session.owner_username = clean_username
+        session.assigned_usernames = sorted(assigned)
+        session.messages.append(
+            ChatMessage(
+                role="system",
+                content=(
+                    f"Propiedad del grupo transferida de @{previous_owner} a @{clean_username}."
+                    if previous_owner
+                    else f"@{clean_username} fue asignado como propietario del grupo."
+                ),
+            )
+        )
+        return repository.save(session)
+
     def assign_chief(self, session_id: str, participant_id: str) -> Session:
         session = self.get(session_id)
         participant = next((item for item in session.participants if item.id == participant_id), None)
@@ -294,7 +316,31 @@ class SessionService:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         changed = normalize_generated_contact_labels(session)
+        identity_changed = normalize_roster_display_names(session)
+        identity_changed = merge_channel_identity_evidence(session) or identity_changed
+        normalized_participants = merge_duplicate_participants(session.participants)
+        if normalized_participants != session.participants:
+            session.participants = normalized_participants
+            identity_changed = True
+        changed = identity_changed or changed
         changed = resolve_generated_participant_names(session) or changed
+        labels_changed = refresh_option_participant_labels(session)
+        changed = labels_changed or changed
+        if identity_changed or labels_changed:
+            next_missing_info = find_missing_info(session)
+            if next_missing_info != session.missing_info:
+                session.missing_info = next_missing_info
+                changed = True
+            if session.status == "confirmed" and session.selected_option:
+                rebuilt = build_confirmed_channel_reply(session)
+                if rebuilt != session.last_agent_reply:
+                    session.last_agent_reply = rebuilt
+                    changed = True
+            elif session.last_agent_reply:
+                rebuilt = build_channel_reply(session)
+                if rebuilt != session.last_agent_reply:
+                    session.last_agent_reply = rebuilt
+                    changed = True
         if changed:
             repository.save(session)
         return session
@@ -347,6 +393,11 @@ class SessionService:
             else:
                 session.participants.append(incoming)
 
+        # La identidad tecnica puede haber agregado un PN/LID al participante
+        # despues de la primera normalizacion. Repetimos la fusion para evitar
+        # que quede un registro historico separado (por ejemplo "Gabriel" y
+        # "+569...") en la misma sesion.
+        session.participants = merge_duplicate_participants(session.participants)
         resolve_generated_participant_names(session)
 
         # Disponibilidad implicita ("no puedo despues de las 16" => puedo antes):
@@ -1152,6 +1203,8 @@ def merge_duplicate_participants(participants: list[Participant]) -> list[Partic
         primary = matching[0]
         primary.availability = merge_slots(primary.availability, participant.availability)
         merge_participant_identity(primary, ids)
+        if is_roster_placeholder_name(primary.name) and not is_roster_placeholder_name(participant.name):
+            primary.name = participant.name
         # Si cualquiera de los dos ya es una persona real (no solo un
         # registro del padron), el resultado deja de ser "roster_only".
         primary.roster_only = primary.roster_only and participant.roster_only
@@ -1367,6 +1420,7 @@ def is_roster_placeholder_name(name: str) -> bool:
         is_generated_contact_name(clean_name)
         or clean_name.startswith("+")
         or clean_name.lower().startswith("participante ")
+        or not is_usable_channel_display_name(clean_name)
     )
 
 
@@ -1396,7 +1450,7 @@ def hydrate_participant_roster(
         external_id = clean_external_id(entry.id)
         if not external_id or len(external_id) < _MIN_EXTERNAL_ID_LEN or external_id in seen:
             continue
-        name = (entry.name or "").strip() or roster_name_for_external_id(external_id)
+        name = roster_display_name(entry.name, external_id)
         entries.append((external_id, name))
         seen.add(external_id)
 
@@ -1431,6 +1485,74 @@ def hydrate_participant_roster(
         changed = True
     session.participants = normalized
     return changed
+
+
+def roster_display_name(name: str | None, external_id: str) -> str:
+    """Devuelve un nombre visible o un fallback tecnico legible.
+
+    WhatsApp puede entregar nombres vacios, un punto u otras etiquetas que
+    no representan a una persona. No se inventa un nombre: se conserva el
+    nombre valido y, si no existe, se muestra el numero/JID normalizado.
+    """
+    clean_name = " ".join((name or "").strip().split())
+    return clean_name if is_usable_channel_display_name(clean_name) else roster_name_for_external_id(external_id)
+
+
+def normalize_roster_display_names(session: Session) -> bool:
+    """Corrige etiquetas invalidas del padron sin tocar sus identidades."""
+    changed = False
+    for participant in session.participants:
+        if is_generated_contact_name(participant.name) or is_usable_channel_display_name(participant.name):
+            continue
+        fallback = roster_name_for_external_id(participant.external_id or "")
+        if fallback and participant.name != fallback:
+            participant.name = fallback
+            changed = True
+    return changed
+
+
+def merge_channel_identity_evidence(session: Session) -> bool:
+    """Une aliases PN/LID solo cuando el gateway los entrego en un mensaje.
+
+    Un nombre igual nunca basta para fusionar dos personas. En cambio, los
+    aliases del mismo remitente son evidencia tecnica explicita y permiten
+    reparar sesiones antiguas donde el padrón se hidrato antes de recibir el
+    vinculo PN/LID.
+    """
+    groups: list[set[str]] = []
+    for message in session.channel_messages:
+        identities = set(channel_message_identity_ids(message))
+        if not identities:
+            continue
+        matching = [group for group in groups if group.intersection(identities)]
+        if not matching:
+            groups.append(identities)
+            continue
+        merged = set(identities)
+        for group in matching:
+            merged.update(group)
+            groups.remove(group)
+        groups.append(merged)
+
+    if not groups:
+        return False
+
+    changed = False
+    for participant in session.participants:
+        participant_ids = set(participant_identity_ids(participant))
+        related = [group for group in groups if participant_ids.intersection(group)]
+        if not related:
+            continue
+        identities = set().union(*related)
+        before = tuple(participant_identity_ids(participant))
+        merge_participant_identity(participant, identities)
+        if before != tuple(participant_identity_ids(participant)):
+            changed = True
+    return changed
+
+
+def channel_message_identity_ids(message: ChannelMessage) -> list[str]:
+    return unique_ids([message.sender_id or "", *(message.sender_aliases or [])])
 
 
 def should_invoke(session: Session, text: str) -> bool:
@@ -1764,10 +1886,9 @@ def build_help_reply(session: Session) -> str:
             f"- *{trigger} reinicia historial*  ·  comienza otra coordinacion sin usar datos anteriores",
             f"- *{trigger} ayuda*  ·  este mensaje",
             "",
-            "*Requeridos y prioridad* (solo coordinadores del grupo)",
+            "*Participantes requeridos* (solo coordinadores del grupo)",
             f"- *{trigger} requerido a @contacto*  ·  esa persona debe estar si o si; las opciones que no la incluyan no se recomiendan",
-            f"- *{trigger} prioridad a @contacto 5*  ·  peso 0-10 para ordenar las opciones (ej. el jefe)",
-            f"- *{trigger} normal a @contacto*  ·  le quita lo de requerido y la prioridad",
+            f"- *{trigger} normal a @contacto*  ·  esa persona deja de ser requerida",
             "",
             "*Formato de respuesta*",
             f"- *{trigger} con imagen*  ·  incluye el calendario grafico",

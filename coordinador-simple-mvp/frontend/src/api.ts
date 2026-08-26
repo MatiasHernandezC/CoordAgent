@@ -189,10 +189,34 @@ export function createUser(username: string, displayName: string, password: stri
   });
 }
 
+export function updatePanelUser(username: string, updates: { display_name?: string; active?: boolean }) {
+  return request<{ user: AppUser }>(`/api/auth/users/${encodeURIComponent(username)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates)
+  });
+}
+
+export function resetPanelUserPassword(username: string, password: string) {
+  return request<{ user: AppUser; password_reset: boolean }>(
+    `/api/auth/users/${encodeURIComponent(username)}/password`,
+    {
+      method: "POST",
+      body: JSON.stringify({ password })
+    }
+  );
+}
+
 export function assignSessionUsers(sessionId: string, usernames: string[]) {
   return request<{ session: Session }>(`/api/sessions/${sessionId}/access`, {
     method: "PUT",
     body: JSON.stringify({ usernames })
+  });
+}
+
+export function transferSessionOwner(sessionId: string, username: string) {
+  return request<{ session: Session }>(`/api/sessions/${sessionId}/owner`, {
+    method: "PUT",
+    body: JSON.stringify({ username })
   });
 }
 

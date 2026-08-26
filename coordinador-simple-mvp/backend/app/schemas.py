@@ -271,8 +271,27 @@ class RegisterPanelUserRequest(CreatePanelUserRequest):
     pass
 
 
+class UpdatePanelUserRequest(BaseModel):
+    display_name: str | None = Field(default=None, min_length=2, max_length=80)
+    active: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.display_name is None and self.active is None:
+            raise ValueError("Debes indicar un cambio para el usuario.")
+        return self
+
+
+class ResetPanelUserPasswordRequest(BaseModel):
+    password: str = Field(min_length=10, max_length=128)
+
+
 class AssignSessionUsersRequest(BaseModel):
     usernames: list[str] = Field(default_factory=list, max_length=100)
+
+
+class TransferSessionOwnerRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
 
 
 class AssignChiefRequest(BaseModel):

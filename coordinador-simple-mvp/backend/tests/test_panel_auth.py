@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.bff.auth_routes as auth_routes_module
@@ -39,12 +40,15 @@ def test_login_and_user_creation_are_admin_only(protected_client):
 
     me = protected_client.get("/api/auth/me", headers=basic("usuario", "usuario-seguro"))
     assert me.status_code == 200
-    assert me.json()["user"] == {
+    me_user = me.json()["user"]
+    assert {key: me_user[key] for key in ("username", "display_name", "is_admin", "role", "active")} == {
         "username": "usuario",
         "display_name": "Usuario",
         "is_admin": False,
         "role": "group_admin",
+        "active": True,
     }
+    assert me_user["created_at"]
 
     denied = protected_client.post(
         "/api/auth/users",
@@ -137,12 +141,15 @@ def test_public_registration_creates_group_admin_and_owner_can_manage_own_group(
         },
     )
     assert registered.status_code == 201
-    assert registered.json()["user"] == {
+    registered_user = registered.json()["user"]
+    assert {key: registered_user[key] for key in ("username", "display_name", "is_admin", "role", "active")} == {
         "username": "propietaria",
         "display_name": "Propietaria Grupo",
         "is_admin": False,
         "role": "group_admin",
+        "active": True,
     }
+    assert registered_user["created_at"]
 
     owner = basic("propietaria", "propietaria-segura")
     created = protected_client.post(
@@ -193,3 +200,115 @@ def test_gateway_links_pending_group_once(protected_client):
     assert linked.json()["session"]["link_code"] is None
     assert linked.json()["session"]["channel_config"]["group_jid"] == "nuevo@g.us"
     assert protected_client.post("/api/channel/groups/link", headers=gateway, json=payload).status_code == 404
+
+
+def test_admin_can_edit_and_reset_password_but_group_admin_cannot(protected_client):
+    admin = basic("admin", "admin-seguro")
+    user = basic("usuario", "usuario-seguro")
+
+    denied = protected_client.patch(
+        "/api/auth/users/usuario",
+        headers=user,
+        json={"display_name": "Nombre indebido"},
+    )
+    assert denied.status_code == 403
+
+    updated = protected_client.patch(
+        "/api/auth/users/usuario",
+        headers=admin,
+        json={"display_name": "Usuario Editado"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["user"]["display_name"] == "Usuario Editado"
+
+    reset = protected_client.post(
+        "/api/auth/users/usuario/password",
+        headers=admin,
+        json={"password": "usuario-nueva-segura"},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["password_reset"] is True
+    assert "password" not in reset.json()["user"]
+    assert protected_client.get("/api/auth/me", headers=user).status_code == 401
+    assert protected_client.get(
+        "/api/auth/me",
+        headers=basic("usuario", "usuario-nueva-segura"),
+    ).status_code == 200
+
+
+def test_owner_must_transfer_groups_before_deactivation(protected_client):
+    admin = basic("admin", "admin-seguro")
+    owner = basic("usuario", "usuario-seguro")
+    new_owner = basic("sin-acceso", "sin-acceso-seguro")
+    session = protected_client.post(
+        "/api/sessions",
+        headers=owner,
+        json={"title": "Grupo transferible"},
+    ).json()["session"]
+
+    blocked = protected_client.patch(
+        "/api/auth/users/usuario",
+        headers=admin,
+        json={"active": False},
+    )
+    assert blocked.status_code == 409
+    assert "Transfiere primero" in blocked.json()["detail"]
+
+    denied_transfer = protected_client.put(
+        f"/api/sessions/{session['id']}/owner",
+        headers=owner,
+        json={"username": "sin-acceso"},
+    )
+    assert denied_transfer.status_code == 403
+
+    transferred = protected_client.put(
+        f"/api/sessions/{session['id']}/owner",
+        headers=admin,
+        json={"username": "sin-acceso"},
+    )
+    assert transferred.status_code == 200
+    transferred_session = transferred.json()["session"]
+    assert transferred_session["owner_username"] == "sin-acceso"
+    assert transferred_session["assigned_usernames"] == ["sin-acceso"]
+    assert protected_client.get(f"/api/sessions/{session['id']}", headers=owner).status_code == 403
+    assert protected_client.get(f"/api/sessions/{session['id']}", headers=new_owner).status_code == 200
+
+    disabled = protected_client.patch(
+        "/api/auth/users/usuario",
+        headers=admin,
+        json={"active": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["user"]["active"] is False
+    assert protected_client.get("/api/auth/me", headers=owner).status_code == 401
+
+    inactive_assignment = protected_client.put(
+        f"/api/sessions/{session['id']}/access",
+        headers=admin,
+        json={"usernames": ["sin-acceso", "usuario"]},
+    )
+    assert inactive_assignment.status_code == 400
+    assert "Usuarios inactivos" in inactive_assignment.json()["detail"]
+
+    reactivated = protected_client.patch(
+        "/api/auth/users/usuario",
+        headers=admin,
+        json={"active": True},
+    )
+    assert reactivated.status_code == 200
+    assert protected_client.get("/api/auth/me", headers=owner).status_code == 200
+
+
+def test_admin_cannot_deactivate_self_or_last_active_admin(tmp_path):
+    service = AuthService(path=tmp_path / "users.json")
+    service.create_user("admin-uno", "Admin Uno", "admin-uno-seguro", is_admin=True)
+    service.create_user("admin-dos", "Admin Dos", "admin-dos-seguro", is_admin=True)
+
+    with pytest.raises(HTTPException) as self_error:
+        service.update_user("admin-uno", active=False, actor_username="admin-uno")
+    assert getattr(self_error.value, "status_code", None) == 400
+
+    service.update_user("admin-dos", active=False, actor_username="admin-uno")
+    with pytest.raises(HTTPException) as last_admin_error:
+        service.update_user("admin-uno", active=False, actor_username="admin-dos")
+    assert getattr(last_admin_error.value, "status_code", None) == 409

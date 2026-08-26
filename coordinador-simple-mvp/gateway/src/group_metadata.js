@@ -142,6 +142,44 @@ function cleanRosterName(value) {
   return value.trim().replace(/\s+/g, " ").slice(0, 120);
 }
 
+function isHumanRosterName(value) {
+  const name = cleanRosterName(value);
+  if (!name) return false;
+  if (name.endsWith("@s.whatsapp.net") || name.endsWith("@lid")) return false;
+  if (/^\+?\d[\d\s().-]*$/.test(name)) return false;
+  return /[^\W\d_]/u.test(name);
+}
+
+function contactRecords(contacts) {
+  if (!contacts) return [];
+  if (contacts instanceof Map) return [...contacts.values()];
+  if (Array.isArray(contacts)) return contacts;
+  if (typeof contacts === "object") return Object.values(contacts);
+  return [];
+}
+
+function contactRosterName(identity, contacts) {
+  const aliases = new Set(identity.aliases);
+  for (const contact of contactRecords(contacts)) {
+    if (!contact || typeof contact !== "object") continue;
+    const contactAliases = identityAliases(contact);
+    if (!contactAliases.some((alias) => aliases.has(alias))) continue;
+
+    // `notify`/`pushName` are the public names exposed by WhatsApp. Prefer
+    // them over `name`, which is only a local address-book label and may not
+    // exist in the linked account's contact directory.
+    const candidate = [
+      contact.notify,
+      contact.pushName,
+      contact.verifiedName,
+      contact.displayName,
+      contact.name
+    ].find((value) => isHumanRosterName(value));
+    if (candidate) return cleanRosterName(candidate);
+  }
+  return "";
+}
+
 function fallbackRosterName(identity) {
   const primary = canonicalAlias([...identity.aliases]);
   const [localPart = "nuevo"] = primary.split("@", 1);
@@ -152,7 +190,7 @@ function fallbackRosterName(identity) {
 }
 
 /** Devuelve el mismo padron con nombres visibles para hidratar el panel. */
-export function humanParticipantRoster(participants, ownIdentity) {
+export function humanParticipantRoster(participants, ownIdentity, contacts = []) {
   const roster = buildHumanRoster(participants, ownIdentity);
   if (!roster) return null;
 
@@ -166,9 +204,14 @@ export function humanParticipantRoster(participants, ownIdentity) {
       const source = participants.find((participant) =>
         identityAliases(participant).some((alias) => aliases.includes(alias))
       );
-      const name = cleanRosterName(
-        source?.notify ?? source?.pushName ?? source?.displayName ?? source?.name
-      );
+      const name = [
+        contactRosterName(identity, contacts),
+        source?.name,
+        source?.notify,
+        source?.pushName,
+        source?.displayName,
+        source?.verifiedName
+      ].find((value) => isHumanRosterName(value));
       return { id: primary, name: name || fallbackRosterName(identity) };
     })
     .filter((entry) => entry.id);

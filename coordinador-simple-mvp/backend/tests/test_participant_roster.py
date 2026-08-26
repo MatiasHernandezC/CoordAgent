@@ -53,9 +53,8 @@ def test_roster_hydration_does_not_nag_silent_members_by_name(client):
     )
 
     assert len(session["participants"]) == 2
-    # Nadie escribio todavia: se cuentan en el total generico ("2
-    # integrantes"), pero no deben aparecer nombrados uno por uno.
-    assert not any("Ana" in item or "Jefe" in item for item in session["missing_info"])
+    # Nadie escribio todavia: se cuentan y se identifican por el padrón.
+    assert any("2 integrante" in item and "Ana" in item and "Jefe" in item for item in session["missing_info"])
     assert any("2 integrante" in item for item in session["missing_info"])
 
 

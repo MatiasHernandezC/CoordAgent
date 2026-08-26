@@ -166,7 +166,7 @@ def test_exclusive_override_uses_fragment_owner_after_y_connector():
     )
 
     assert _availability(extraction, "Ana") == [("jueves", "09:00", "12:00")]
-    assert _availability(extraction, "Luisa") == [("viernes", "15:00", "18:00")]
+    assert _availability(extraction, "Luisa") == [("viernes", "16:00", "18:00")]
 
 
 def test_grounded_override_corrects_return_home_phrase():

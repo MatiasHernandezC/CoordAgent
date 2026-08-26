@@ -825,6 +825,105 @@ button.session-row.selected {
   color: #69767e;
 }
 
+.user-management-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.managed-user {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #d8e2df;
+  border-radius: 9px;
+  padding: 11px;
+  background: #fbfcfc;
+}
+
+.managed-user.inactive,
+.access-user.inactive {
+  background: #f4f4f2;
+  opacity: 0.78;
+}
+
+.managed-user-head,
+.user-badges,
+.user-group-counts,
+.managed-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.managed-user-head {
+  justify-content: space-between;
+}
+
+.managed-user-head strong,
+.managed-user-head small {
+  display: block;
+}
+
+.managed-user-head small,
+.owner-transfer small {
+  margin-top: 2px;
+  color: #69767e;
+}
+
+.role-badge {
+  border: 1px solid #cad8d3;
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: #fff;
+  color: #40535e;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.user-group-counts {
+  color: #5f6c74;
+  font-size: 12px;
+}
+
+.user-group-counts span {
+  border-right: 1px solid #d8e2df;
+  padding-right: 8px;
+}
+
+.user-group-counts span:last-child {
+  border-right: 0;
+}
+
+.inline-user-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: end;
+  border-top: 1px solid #e1e8e5;
+  padding-top: 9px;
+}
+
+.user-access-section,
+.owner-transfer {
+  border-top: 1px solid #e4ebe8;
+  padding-top: 14px;
+  margin-top: 14px;
+}
+
+.owner-transfer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 1fr) auto;
+  gap: 9px;
+  align-items: end;
+}
+
+.owner-transfer > div {
+  display: grid;
+  gap: 3px;
+}
+
 .normal-facts {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1484,7 +1583,9 @@ button.session-row.selected {
   .person-row,
   .option-row,
   .correction-form,
-  .command-list {
+  .command-list,
+  .inline-user-form,
+  .owner-transfer {
     grid-template-columns: 1fr;
   }
 

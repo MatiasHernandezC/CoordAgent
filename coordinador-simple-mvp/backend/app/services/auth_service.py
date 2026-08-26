@@ -10,6 +10,7 @@ import secrets
 import threading
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import HTTPException, Request
@@ -25,6 +26,8 @@ class AuthUser:
     display_name: str
     is_admin: bool = False
     role: str = "group_admin"
+    active: bool = True
+    created_at: str | None = None
 
     def __post_init__(self) -> None:
         if self.is_admin and self.role != "platform_admin":
@@ -67,6 +70,7 @@ class AuthService:
                             display_name TEXT NOT NULL,
                             is_admin BOOLEAN NOT NULL DEFAULT FALSE,
                             role TEXT NOT NULL DEFAULT 'group_admin',
+                            active BOOLEAN NOT NULL DEFAULT TRUE,
                             salt TEXT NOT NULL,
                             password_hash TEXT NOT NULL,
                             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -74,6 +78,9 @@ class AuthService:
                     """))
                     connection.execute(text(
                         "ALTER TABLE app_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'group_admin'"
+                    ))
+                    connection.execute(text(
+                        "ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE"
                     ))
                     connection.execute(text(
                         "UPDATE app_users SET role = 'platform_admin' WHERE is_admin = TRUE AND role <> 'platform_admin'"
@@ -159,6 +166,7 @@ class AuthService:
             raise HTTPException(status_code=400, detail="Rol de usuario invalido.")
         is_admin = clean_role == "platform_admin"
         salt, password_hash = self._hash_password(password)
+        created_at = datetime.now(timezone.utc).isoformat()
         if self._using_postgres():
             try:
                 with self._get_engine().begin() as connection:
@@ -189,16 +197,25 @@ class AuthService:
                     "role": clean_role,
                     "salt": salt,
                     "password_hash": password_hash,
+                    "active": True,
+                    "created_at": created_at,
                 }
                 self._write_json(users)
-        return AuthUser(clean_username, clean_name, is_admin, clean_role)
+        return self.get_user(clean_username, _skip_ready=True) or AuthUser(
+            clean_username,
+            clean_name,
+            is_admin,
+            clean_role,
+            True,
+            created_at,
+        )
 
     def _record(self, username: str) -> dict | None:
         key = self.normalize_username(username)
         if self._using_postgres():
             with self._get_engine().connect() as connection:
                 row = connection.execute(
-                    text("SELECT username, display_name, is_admin, role, salt, password_hash FROM app_users WHERE username = :username"),
+                    text("SELECT username, display_name, is_admin, role, active, salt, password_hash, created_at FROM app_users WHERE username = :username"),
                     {"username": key},
                 ).mappings().first()
             return dict(row) if row else None
@@ -208,10 +225,9 @@ class AuthService:
     def authenticate(self, username: str, password: str) -> AuthUser | None:
         self._ensure_ready()
         record = self._record(username)
-        if not record or not self._verify_password(password, record):
+        if not record or not bool(record.get("active", True)) or not self._verify_password(password, record):
             return None
-        role = str(record.get("role") or ("platform_admin" if record.get("is_admin") else "group_admin"))
-        return AuthUser(record["username"], str(record["display_name"]), bool(record["is_admin"]), role)
+        return self._user_from_record(record)
 
     def get_user(self, username: str, *, _skip_ready: bool = False) -> AuthUser | None:
         if not _skip_ready:
@@ -219,8 +235,7 @@ class AuthService:
         record = self._record(username)
         if not record:
             return None
-        role = str(record.get("role") or ("platform_admin" if record.get("is_admin") else "group_admin"))
-        return AuthUser(record["username"], str(record["display_name"]), bool(record["is_admin"]), role)
+        return self._user_from_record(record)
 
     def list_users(self, *, _skip_ready: bool = False) -> list[AuthUser]:
         if not _skip_ready:
@@ -228,22 +243,116 @@ class AuthService:
         if self._using_postgres():
             with self._get_engine().connect() as connection:
                 rows = connection.execute(
-                    text("SELECT username, display_name, is_admin, role FROM app_users ORDER BY username")
+                    text("SELECT username, display_name, is_admin, role, active, created_at FROM app_users ORDER BY username")
                 ).mappings().all()
-            return [
-                AuthUser(row["username"], row["display_name"], bool(row["is_admin"]), str(row["role"]))
-                for row in rows
-            ]
+            return [self._user_from_record(dict(row)) for row in rows]
         return [
-            AuthUser(
-                username,
-                str(record.get("display_name") or username),
-                bool(record.get("is_admin")),
-                str(record.get("role") or ("platform_admin" if record.get("is_admin") else "group_admin")),
-            )
+            self._user_from_record({"username": username, **record})
             for username, record in sorted(self._read_json().items())
             if isinstance(record, dict)
         ]
+
+    @staticmethod
+    def _user_from_record(record: dict) -> AuthUser:
+        is_admin = bool(record.get("is_admin"))
+        role = str(record.get("role") or ("platform_admin" if is_admin else "group_admin"))
+        created_at = record.get("created_at")
+        if created_at is not None and hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+        return AuthUser(
+            str(record["username"]),
+            str(record.get("display_name") or record["username"]),
+            is_admin,
+            role,
+            bool(record.get("active", True)),
+            str(created_at) if created_at else None,
+        )
+
+    def update_user(
+        self,
+        username: str,
+        *,
+        display_name: str | None = None,
+        active: bool | None = None,
+        actor_username: str | None = None,
+    ) -> AuthUser:
+        self._ensure_ready()
+        key = self.normalize_username(username)
+        record = self._record(key)
+        if not record:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+        clean_name = display_name.strip() if display_name is not None else None
+        if clean_name is not None and len(clean_name) < 2:
+            raise HTTPException(status_code=400, detail="El nombre visible es demasiado corto.")
+        if active is False and key == self.normalize_username(actor_username or ""):
+            raise HTTPException(status_code=400, detail="No puedes desactivar tu propia cuenta.")
+
+        if self._using_postgres():
+            with self._get_engine().begin() as connection:
+                if active is False and bool(record.get("is_admin")) and bool(record.get("active", True)):
+                    active_admins = connection.execute(text(
+                        "SELECT COUNT(*) FROM app_users WHERE is_admin = TRUE AND active = TRUE"
+                    )).scalar_one()
+                    if active_admins <= 1:
+                        raise HTTPException(status_code=409, detail="Debe quedar al menos un administrador activo.")
+                if clean_name is not None:
+                    connection.execute(
+                        text("UPDATE app_users SET display_name = :display_name WHERE username = :username"),
+                        {"username": key, "display_name": clean_name},
+                    )
+                if active is not None:
+                    connection.execute(
+                        text("UPDATE app_users SET active = :active WHERE username = :username"),
+                        {"username": key, "active": active},
+                    )
+        else:
+            with self._lock:
+                users = self._read_json()
+                stored = users.get(key)
+                if not isinstance(stored, dict):
+                    raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+                if active is False and bool(stored.get("is_admin")) and bool(stored.get("active", True)):
+                    active_admins = sum(
+                        1
+                        for value in users.values()
+                        if isinstance(value, dict) and value.get("is_admin") and value.get("active", True)
+                    )
+                    if active_admins <= 1:
+                        raise HTTPException(status_code=409, detail="Debe quedar al menos un administrador activo.")
+                if clean_name is not None:
+                    stored["display_name"] = clean_name
+                if active is not None:
+                    stored["active"] = active
+                users[key] = stored
+                self._write_json(users)
+        return self.get_user(key)  # type: ignore[return-value]
+
+    def reset_password(self, username: str, password: str) -> AuthUser:
+        self._ensure_ready()
+        key = self.normalize_username(username)
+        if len(password) < 10:
+            raise HTTPException(status_code=400, detail="La contrasena debe tener al menos 10 caracteres.")
+        if not self._record(key):
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+        salt, password_hash = self._hash_password(password)
+        if self._using_postgres():
+            with self._get_engine().begin() as connection:
+                connection.execute(
+                    text("UPDATE app_users SET salt = :salt, password_hash = :password_hash WHERE username = :username"),
+                    {"username": key, "salt": salt, "password_hash": password_hash},
+                )
+        else:
+            with self._lock:
+                users = self._read_json()
+                stored = users.get(key)
+                if not isinstance(stored, dict):
+                    raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+                stored["salt"] = salt
+                stored["password_hash"] = password_hash
+                users[key] = stored
+                self._write_json(users)
+        return self.get_user(key)  # type: ignore[return-value]
 
 
 auth_service = AuthService()

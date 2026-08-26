@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildHumanRoster,
   coordinatorIds,
+  humanParticipantRoster,
   humanParticipantCount,
   humanParticipantIds,
   identitiesOverlap,
@@ -133,4 +134,30 @@ test("detecta que un participante LID agregado es el propio bot", () => {
     }),
     false
   );
+});
+
+test("prefiere el nombre publico del contacto sobre el nombre local", () => {
+  const target = {
+    id: "119048071307283@lid",
+    jid: "56962122151@s.whatsapp.net"
+  };
+  const roster = humanParticipantRoster(
+    [
+      target,
+      { id: "bot-lid@lid", jid: "bot@s.whatsapp.net", admin: "admin" }
+    ],
+    { id: "bot@s.whatsapp.net", lid: "bot-lid@lid" },
+    [
+      {
+        id: "56962122151@s.whatsapp.net",
+        lid: "119048071307283@lid",
+        name: "Gabo",
+        notify: "Gabriel"
+      }
+    ]
+  );
+
+  assert.deepEqual(roster.participantRoster, [
+    { id: "56962122151@s.whatsapp.net", name: "Gabriel" }
+  ]);
 });

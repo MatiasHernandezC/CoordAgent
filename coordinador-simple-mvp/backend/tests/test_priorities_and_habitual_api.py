@@ -159,16 +159,15 @@ def _create_session(client):
     return response.json()["session"]["id"]
 
 
-def test_help_command_documents_requirement_and_priority_commands(client):
-    """La ayuda se quedo atras cuando se agregaron requerido/prioridad/normal
-    y confirmar-igual: los mencionaba en el codigo pero no en `@coordina
-    ayuda`. Este test fija que toda palabra clave que classify_channel_command
-    reconoce quede documentada."""
+def test_help_command_documents_requirements_without_disabled_priority(client):
+    """La ayuda publica solo documenta los controles actualmente habilitados."""
     session_id = _resolve_group(client)
     response = _channel(client, session_id, "Jefe", "jefe@s.whatsapp.net", "@coordina ayuda", "help1")
     reply = response.json()["agent_reply"]
 
     for keyword in ["confirmar", "confirmar igual", "cancela", "resumen", "faltan", "exportar", "quita a", "reinicia"]:
         assert keyword in reply, f"falta '{keyword}' en la ayuda"
-    for keyword in ["requerido", "prioridad", "normal"]:
+    for keyword in ["requerido", "normal"]:
         assert keyword in reply, f"falta el comando '{keyword}' en la ayuda"
+    assert "prioridad" not in reply.lower()
+    assert "peso 0-10" not in reply.lower()

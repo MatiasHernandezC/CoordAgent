@@ -6,13 +6,14 @@ import { dirname, join } from "node:path";
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
+  proto,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 
 import { sendAgentReply } from "./delivery.js";
-import { humanParticipantRoster, identitiesOverlap } from "./group_metadata.js";
+import { humanParticipantRoster, identityAliases, identitiesOverlap } from "./group_metadata.js";
 import { channelMessagePayload, messageIdentityMetadataOf, messageTextOf } from "./message_metadata.js";
 import { extractLinkCode, isCoordinaInvocation } from "./linking.js";
 import { PersistentQueue } from "./persistent_queue.js";
@@ -44,6 +45,7 @@ const PENDING_RETRY_MAX_MS = envInt("PENDING_RETRY_MAX_MS", 300000);
 const MAX_PENDING_ATTEMPTS = envInt("MAX_PENDING_ATTEMPTS", 12);
 const FIRE_INIT_QUERIES = envBool("WA_FIRE_INIT_QUERIES", false);
 const HEALTH_PORT = envInt("HEALTH_PORT", 8080);
+const PUBLIC_NAME_HISTORY_TYPE = proto.Message.HistorySyncNotification.HistorySyncType.PUSH_NAME;
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
 const pendingQueue = new PersistentQueue(PENDING_FILE, MAX_PENDING_MESSAGES);
@@ -63,11 +65,16 @@ let lastConnectionReason = null;
 let drainingPending = false;
 let pendingDrainTimer = null;
 let groupSyncTimer = null;
+let contactSyncTimer = null;
 let queueOverflowCount = 0;
 let lastQueueErrorAt = null;
 let currentQrSvg = null;
 let botPhoneNumber = null;
 const recentMessageIds = new Set();
+// Baileys entrega el JID de una mencion, pero el nombre visible suele vivir
+// en el directorio de contactos y no dentro de groupMetadata(). Se conserva
+// solo en memoria para enriquecer el padron que se envia al backend.
+const contactDirectory = new Map();
 
 function qrToSvg(value) {
   const qr = new QRCode(-1, QRErrorCorrectLevel.L);
@@ -106,6 +113,45 @@ function envBool(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   return ["1", "true", "yes", "y", "on"].includes(raw.trim().toLowerCase());
+}
+
+function rememberContacts(contacts) {
+  for (const contact of contacts ?? []) {
+    if (!contact || typeof contact !== "object") continue;
+    const aliases = identityAliases(contact);
+    const hasName = [
+      contact.name,
+      contact.notify,
+      contact.pushName,
+      contact.displayName,
+      contact.verifiedName
+    ].some((value) => typeof value === "string" && value.trim());
+    if (!aliases.length || !hasName) continue;
+
+    for (const alias of aliases) {
+      contactDirectory.set(alias, { ...contact });
+    }
+  }
+}
+
+function knownContacts() {
+  return [...contactDirectory.values()];
+}
+
+function scheduleContactRosterSync() {
+  if (contactSyncTimer || !currentSock || connectionState !== "connected") return;
+  contactSyncTimer = setTimeout(() => {
+    contactSyncTimer = null;
+    syncKnownGroups(currentSock).catch((err) =>
+      logger.warn({ err: String(err) }, "fallo actualizando nombres desde contactos")
+    );
+  }, 1000);
+  contactSyncTimer.unref();
+}
+
+function rememberContactsAndSchedule(contacts) {
+  rememberContacts(contacts);
+  scheduleContactRosterSync();
 }
 
 function loadGroupSessions() {
@@ -165,7 +211,7 @@ async function readGroupMetadata(sock, groupJid) {
   try {
     const metadata = await sock.groupMetadata(groupJid);
     const groupName = cleanLabel(metadata?.subject, "grupo de WhatsApp");
-    const roster = humanParticipantRoster(metadata?.participants, sock.user);
+    const roster = humanParticipantRoster(metadata?.participants, sock.user, knownContacts());
     if (!roster) {
       throw new Error("WhatsApp no entrego la lista de participantes");
     }
@@ -364,11 +410,18 @@ async function start() {
       markOnlineOnConnect: true,
       syncFullHistory: false,
       fireInitQueries: FIRE_INIT_QUERIES,
-      shouldSyncHistoryMessage: () => false
+      // WhatsApp can deliver public profile names in a dedicated history
+      // packet. Accept only PUSH_NAME: never request or process full chat
+      // history just to enrich the roster.
+      shouldSyncHistoryMessage: (historyMessage) =>
+        historyMessage?.syncType === PUBLIC_NAME_HISTORY_TYPE
     });
     currentSock = sock;
 
     sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("contacts.upsert", rememberContactsAndSchedule);
+    sock.ev.on("contacts.update", rememberContactsAndSchedule);
+    sock.ev.on("messaging-history.set", ({ contacts }) => rememberContactsAndSchedule(contacts));
     sock.ev.on("connection.update", (update) => handleConnectionUpdate(sock, update));
     sock.ev.on("messages.upsert", (event) => handleMessages(sock, event));
     sock.ev.on("group-participants.update", (event) => handleGroupParticipants(sock, event));

@@ -1894,8 +1894,8 @@ def detect_slots(
     elif "tarde" in normalized or "atrde" in normalized:
         start_hour, end_hour = max(15, workday_start), workday_end
 
-    # Tope superior en fragmentos positivos: "puede el lunes pero no despues de
-    # las 4" o "esta libre el lunes hasta las 4" acotan el final, no el inicio.
+    # Topes superiores que contienen "despues" deben identificarse antes del
+    # limite inferior: en "puede, pero no despues de las 4", las 4 son el final.
     negated_after_match = re.search(
         r"\bno\b[^,;.]{0,40}?\bdespues\s+de\s+las?\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?",
         normalized,
@@ -1904,16 +1904,42 @@ def detect_slots(
         r"\b(?:hasta|antes\s+de)\s+las?\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?",
         normalized,
     )
-    upper_bound = negated_after_match or positive_until_match
-    if upper_bound and not is_unavailability_fragment(fragment):
-        hour = normalize_hour_for_context(int(upper_bound.group(1)), normalized)
-        return slots_in_workday(days, start_hour, hour, workday_start, workday_end)
 
     hour_match = re.search(r"(desde las|desde la|despues de las|despues de la|despues las|despues la|pasado las|pasado la|tipo las|tipo la|como a las|como a la)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?", normalized)
-    if hour_match:
-        hour = normalize_hour_for_context(int(hour_match.group(2)), normalized)
+    hour_is_negated_upper_bound = bool(
+        hour_match
+        and negated_after_match
+        and not is_unavailability_fragment(fragment)
+        and hour_match.start() >= negated_after_match.start()
+    )
+    if hour_match and not hour_is_negated_upper_bound:
+        hour = normalize_range_hour(
+            int(hour_match.group(2)),
+            hour_match.group(3),
+            normalized,
+        )
+        qualifier = hour_match.group(1)
+        # En una grilla de bloques completos, "despues de las 9" no incluye
+        # 09:00-10:00: el primer bloque completamente posterior es 10:00-11:00.
+        # "Desde las 9" sigue siendo inclusivo. No se aplica a frases negativas
+        # como "no puedo despues de las 9", cuya resta conserva otro criterio.
+        if not is_unavailability_fragment(fragment) and (
+            qualifier.startswith("despues") or qualifier.startswith("pasado")
+        ):
+            hour += 1
         start_hour = hour
         end_hour = workday_end
+
+    # Tope superior en fragmentos positivos: "puede el lunes pero no despues de
+    # las 4" o "esta libre el lunes hasta las 4" acotan el final, no el inicio.
+    upper_bound = negated_after_match or positive_until_match
+    if upper_bound and not is_unavailability_fragment(fragment):
+        hour = normalize_range_hour(
+            int(upper_bound.group(1)),
+            upper_bound.group(2),
+            normalized,
+        )
+        return slots_in_workday(days, start_hour, hour, workday_start, workday_end)
 
     exact_hour_match = re.search(r"\ba\s+(?:la|las|los)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)?\b", normalized)
     if exact_hour_match:
@@ -2534,8 +2560,10 @@ def build_channel_identity_display_names(messages: list[ChannelMessage]) -> dict
     """Indice identidad WhatsApp -> pushName humano visto en el canal.
 
     Usa el nombre publico (`sender` / pushName) de cada mensaje humano y lo
-    asocia a todos sus aliases (PN y LID). Asi una mencion numerica posterior
-    del mismo JID puede mostrarse como Gabriel en vez de "Contacto mencionado".
+    asocia a todos sus aliases (PN y LID). Tambien conserva el texto visible de
+    una mencion verificada (`mentioned_jids` + `@Nombre`): ese apodo local puede
+    ser mas util que el pushName publico y permite resolver menciones numericas
+    posteriores sin inventar identidades.
     """
 
     names: dict[str, str] = {}
@@ -2549,6 +2577,16 @@ def build_channel_identity_display_names(messages: list[ChannelMessage]) -> dict
             existing = names.get(identity)
             if existing is None or not is_usable_channel_display_name(existing):
                 names[identity] = display_name
+
+        mentioned_ids = channel_identity_values(tuple(message.mentioned_jids))
+        mention_tokens = list(_CHANNEL_MENTION_PATTERN.finditer(message.text))
+        # Solo se usa el apodo si hay correspondencia uno-a-uno. El orden de
+        # varias menciones no prueba que cada token pertenezca a cada JID.
+        if len(mentioned_ids) == 1 and len(mention_tokens) == 1:
+            raw_label = mention_tokens[0].group(1).strip()
+            if is_usable_channel_display_name(raw_label):
+                for identity in mentioned_ids:
+                    names[identity] = normalize_person_name(raw_label)
     return names
 
 

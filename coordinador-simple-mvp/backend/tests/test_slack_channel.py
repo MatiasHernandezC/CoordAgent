@@ -224,11 +224,11 @@ def test_slack_events_full_flow_creates_session_and_replies(client, monkeypatch)
     assert sessions[0]["channel_config"]["group_name"] == "#equipo"
 
 
-def test_slack_events_hydrates_roster_without_naming_silent_members(client, monkeypatch):
+def test_slack_events_hydrates_roster_and_names_silent_members(client, monkeypatch):
     """El padron del canal (conversations.members) se sincroniza en cada
-    mensaje: los miembros que todavia no escribieron no deben aparecer
-    nombrados uno por uno en missing_info, y quien si escribe debe quedar con
-    su nombre real (no el placeholder que le puso el padron)."""
+    mensaje: los miembros que todavia no escribieron deben quedar identificados
+    por nombre, y quien si escribe debe conservar su nombre real (no el
+    placeholder que le puso el padron)."""
     monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: "Camila")
     monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#equipo")
     monkeypatch.setattr(slack_routes, "post_message", lambda channel, text, blocks=None: None)
@@ -275,8 +275,8 @@ def test_slack_events_hydrates_roster_without_naming_silent_members(client, monk
     assert nicolas["roster_only"] is True
     assert nicolas["availability"] == []
 
-    # Nicolas no escribio nada todavia: no debe salir nombrado en missing_info.
-    assert not any("Nicolas" in item for item in session["missing_info"])
+    # Nicolas no escribio nada todavia, pero el padrón permite decir quién falta.
+    assert any("Nicolas" in item for item in session["missing_info"])
 
 
 def test_slack_events_duplicate_ts_is_idempotent(client, monkeypatch):
@@ -327,6 +327,15 @@ def test_normalize_bot_mention_ignores_other_users():
 def test_normalize_bot_mention_noop_without_bot_id():
     text = "<@U0BOT123> organiza"
     assert slack_routes._normalize_bot_mention(text, None) == text
+
+
+def test_extract_user_mentions_excludes_bot_and_deduplicates():
+    text = "<@UBOT123> coordina con <@U456> y <@U456|Daniel>"
+    assert slack_routes._extract_user_mentions(text, "UBOT123") == ["U456"]
+
+
+def test_extract_user_mentions_ignores_names_typed_manually():
+    assert slack_routes._extract_user_mentions("@Daniel puede el lunes", "UBOT123") == []
 
 
 def test_extract_bot_user_id_prefers_authorizations_field(monkeypatch):
@@ -397,6 +406,69 @@ def test_slack_events_invokes_on_real_bot_mention(client, monkeypatch):
     channel, text = sent[0]
     assert channel == "C999"
     assert "Coordina" in text
+
+
+def test_slack_real_user_mention_updates_the_mentioned_participant(client, monkeypatch):
+    names = {"U123": "Nicolas", "U456": "Daniel"}
+    monkeypatch.setattr(slack_routes, "resolve_display_name", lambda user_id: names.get(user_id, user_id))
+    monkeypatch.setattr(slack_routes, "resolve_channel_name", lambda channel_id: "#tavi")
+    monkeypatch.setattr(slack_routes, "post_message", lambda *a, **k: None)
+    monkeypatch.setattr(slack_routes, "upload_file", lambda *a, **k: None)
+    monkeypatch.setattr(
+        slack_routes,
+        "resolve_channel_roster",
+        lambda channel_id, bot_user_id=None: {
+            "participant_count": 2,
+            "participant_ids": ["U123", "U456"],
+            "coordinator_ids": [],
+            "participant_roster": [
+                ParticipantRosterEntry(id="U123", name="Nicolas"),
+                ParticipantRosterEntry(id="U456", name="Daniel"),
+            ],
+        },
+    )
+
+    mention = _post_event(
+        client,
+        {
+            "type": "event_callback",
+            "authorizations": [{"user_id": "UBOT123", "is_bot": True}],
+            "event": {
+                "type": "message",
+                "channel": "C999",
+                "user": "U123",
+                "text": "<@U456> puede lunes todo el dia",
+                "ts": "1700000010.000100",
+                "channel_type": "channel",
+            },
+        },
+    )
+    invoke = _post_event(
+        client,
+        {
+            "type": "event_callback",
+            "authorizations": [{"user_id": "UBOT123", "is_bot": True}],
+            "event": {
+                "type": "message",
+                "channel": "C999",
+                "user": "U123",
+                "text": "<@UBOT123>",
+                "ts": "1700000011.000100",
+                "channel_type": "channel",
+            },
+        },
+    )
+
+    assert mention.status_code == 200
+    assert invoke.status_code == 200
+    session = client.get("/api/sessions").json()["sessions"][0]
+    reported_message = next(message for message in session["channel_messages"] if message["external_id"] == "1700000010.000100")
+    assert reported_message["mentioned_jids"] == ["u456"]
+    daniel = next(participant for participant in session["participants"] if participant["external_id"] == "u456")
+    assert daniel["name"] == "Daniel"
+    assert [(slot["day"], slot["start"], slot["end"]) for slot in daniel["availability"]] == [
+        ("lunes", "09:00", "18:00")
+    ]
 
 
 # --- Subida de archivos (files.getUploadURLExternal, files.upload esta deprecado) --
