@@ -301,7 +301,7 @@ La sonda `tools/probe_local_architecture.py` usa un modelo local real como
 entrada, pero evalua el sistema completo:
 
 ```powershell
-& "C:\Users\cocan\Downloads\(Ultimos ramos)\TAVI\.venv\Scripts\python.exe" tools\probe_local_architecture.py --model qwen --timeout 240 --out data\local_architecture_probe.json
+& "<RUTA_PROYECTO>\.venv\Scripts\python.exe" tools\probe_local_architecture.py --model qwen --timeout 240 --out data\local_architecture_probe.json
 ```
 
 Ultima validacion local:

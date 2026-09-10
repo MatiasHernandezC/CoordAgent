@@ -73,9 +73,6 @@ Parrafo para informe:
 > horario permanece en un motor determinista en Python; el LLM no decide la
 > reunion.
 
-Validacion operativa (local + droplet, rollback y casos Gemini):
-[VALIDACION_RAG.md](VALIDACION_RAG.md).
-
 Post-proceso determinista: `apply_memory_identity` renombra alias extraidos
 (ej. `Yuli` -> `Julissa (Yuli)`) usando el roster recuperado, sin inventar
 horarios.

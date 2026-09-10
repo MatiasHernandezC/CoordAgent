@@ -11,7 +11,7 @@ Probar los modelos GGUF locales contra casos dificiles de disponibilidad en espa
 Desde `coordinador-simple-mvp`:
 
 ```powershell
-& "C:\Users\cocan\Downloads\(Ultimos ramos)\TAVI\.venv\Scripts\python.exe" tools\evaluate_local_models.py --models qwen phi qwen-mini tiny --max-tokens 500 --ctx 4096
+& "<RUTA_PROYECTO>\.venv\Scripts\python.exe" tools\evaluate_local_models.py --models qwen phi qwen-mini tiny --max-tokens 500 --ctx 4096
 ```
 
 El evaluador carga cada GGUF una sola vez, ejecuta los casos, compila el JSON con el backend real y escribe un reporte JSON en `data/local_model_eval.json` o en el archivo indicado con `--out`.
@@ -44,7 +44,7 @@ El evaluador carga cada GGUF una sola vez, ejecuta los casos, compila el JSON co
 Comando:
 
 ```powershell
-& "C:\Users\cocan\Downloads\(Ultimos ramos)\TAVI\.venv\Scripts\python.exe" tools\probe_local_architecture.py --model qwen --timeout 240 --out data\local_architecture_probe.json
+& "<RUTA_PROYECTO>\.venv\Scripts\python.exe" tools\probe_local_architecture.py --model qwen --timeout 240 --out data\local_architecture_probe.json
 ```
 
 Resultado de la ultima corrida:

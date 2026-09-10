@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$SshHost = "root@161.35.17.179",
+    [Parameter(Mandatory = $true)]
+    [string]$SshHost,
     [string]$RemoteBackupCommand = "/usr/local/sbin/tavi-coordina-backup",
     [string]$LocalBackupDirectory = "$HOME\Backups\TAVI-Coordina",
     [string]$PrivateKey = "$HOME\.tavi-coordina-backup\private-key.pem",

@@ -45,19 +45,19 @@ No se corre un LLM local en el droplet; Gemini corre en la nube.
 
 ## DNS
 
-Ejemplo usado en produccion:
+Ejemplo:
 
 ```txt
 Tipo: A
 Nombre: coordina
-Valor: 161.35.17.179
+Valor: <IP_DROPLET>
 TTL: 14400
 ```
 
 Resultado:
 
 ```txt
-coordina.xshift007.com -> 161.35.17.179
+coordina.xshift007.com -> <IP_DROPLET>
 ```
 
 Validar:
@@ -315,7 +315,7 @@ y cifra el resultado sin incluir `.env.prod`. La descarga y verificacion fuera
 del droplet se ejecutan desde Windows con:
 
 ```powershell
-.\ops\pull_encrypted_backup.ps1
+.\ops\pull_encrypted_backup.ps1 -SshHost root@<IP_DROPLET>
 ```
 
 Procedimiento completo: [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md).

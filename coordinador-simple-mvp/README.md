@@ -1,4 +1,4 @@
-<img src="docs/logo.png" alt="Coordina" width="120" />
+<img src="frontend/public/logo.png" alt="Coordina" width="120" />
 
 # Coordina WhatsApp MVP
 
@@ -20,6 +20,7 @@ Estado actual del MVP:
 10. Cola persistente e idempotencia por ID de WhatsApp para reintentar sin duplicar decisiones.
 11. Healthchecks, rotacion de logs, respaldo cifrado y monitor systemd del droplet.
 12. Canal Slack opcional (ademas de WhatsApp), reutilizando el mismo pipeline de extraccion/decision. Ver [docs/DESPLIEGUE_SLACK.md](docs/DESPLIEGUE_SLACK.md).
+13. Integracion opcional con Google Calendar: al confirmar, crea el evento real en la cuenta conectada (ademas del link/.ics de siempre). Ver [docs/CONFIGURACION_GOOGLE_CALENDAR.md](docs/CONFIGURACION_GOOGLE_CALENDAR.md).
 
 ## Roles y propiedad de grupos
 
@@ -27,7 +28,6 @@ Estado actual del MVP:
 - `group_admin`: se registra desde el frontend, crea sus grupos y solo puede administrar los grupos de su propiedad.
 - Un grupo creado por `group_admin` entrega un código de un solo uso. Después de agregar manualmente el bot al grupo de WhatsApp, el propietario envía `@coordina vincular CODIGO` dentro del grupo.
 - El código se invalida al vincularse; un grupo no puede ser reclamado por dos cuentas.
-13. Integracion opcional con Google Calendar: al confirmar, crea el evento real en la cuenta conectada (ademas del link/.ics de siempre). Ver [docs/CONFIGURACION_GOOGLE_CALENDAR.md](docs/CONFIGURACION_GOOGLE_CALENDAR.md).
 
 ## Mejoras Operativas
 
@@ -87,11 +87,6 @@ flowchart LR
 
 Mas detalle: [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md).
 
-Mapa visual de codigo y relaciones (fuera del paquete de app):
-
-- [../documentacion/mapa-codigo-coordina.html](../documentacion/mapa-codigo-coordina.html)
-- [../documentacion/INDICE_DOCUMENTACION.md](../documentacion/INDICE_DOCUMENTACION.md)
-
 ## Carpetas
 
 ```txt
@@ -102,27 +97,36 @@ coordinador-simple-mvp/
 +-- docs/          Arquitectura, despliegue y configuracion LLM
 +-- Caddyfile      HTTPS, headers y proxy del dominio publico
 +-- docker-compose.prod.yml
-
-../documentacion/  Mapa HTML de codigo + indice de cobertura documental
 ```
 
 ## Ejecutar Local
 
 Backend:
 
+Windows (PowerShell):
+
 ```powershell
 cd backend
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:PYTHONPATH="."
 $env:DB_BACKEND="json"
 $env:LLM_PROVIDER="mock"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
+Linux/macOS:
+
+```bash
+cd backend
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+DB_BACKEND=json LLM_PROVIDER=mock python -m uvicorn app.main:app --reload --port 8000
+```
+
 Frontend:
 
-```powershell
+```bash
 cd frontend
 npm install
 npm run dev
@@ -215,12 +219,25 @@ Detalle: [docs/CONFIGURACION_LLM.md](docs/CONFIGURACION_LLM.md).
 
 ## Pruebas
 
-```powershell
-$env:PYTHONPATH="backend"
-backend\.venv\Scripts\python.exe -m pytest backend\tests -q
-node --check gateway\src\index.js
+Linux/macOS:
+
+```bash
+(cd backend && DB_BACKEND=json LLM_PROVIDER=mock .venv/bin/python -m pytest -q)   # 382 passed
+(cd gateway && npm ci && node --test)                                             # 28 passed
 npm --prefix frontend run build
 ```
+
+Windows (PowerShell):
+
+```powershell
+cd backend; $env:DB_BACKEND="json"; $env:LLM_PROVIDER="mock"; .\.venv\Scripts\python.exe -m pytest -q; cd ..
+cd gateway; npm ci; node --test; cd ..
+npm --prefix frontend run build
+```
+
+`backend/conftest.py` ya fija `DB_BACKEND=json` por defecto, asi que alcanza con
+`pytest` en limpio dentro de `backend/` sin exportar nada; las variables de arriba
+solo hacen explicito el modo usado en CI.
 
 Cobertura funcional importante:
 

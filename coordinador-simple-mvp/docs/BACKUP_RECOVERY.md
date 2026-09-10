@@ -42,8 +42,8 @@ medio seguro separado; sin esa clave no es posible recuperar los `.cms`.
 Desde PowerShell:
 
 ```powershell
-cd "C:\Users\cocan\Downloads\(Ultimos ramos)\TAVI\Proyecto\TAVI-Charlie-whatsapp\coordinador-simple-mvp"
-.\ops\pull_encrypted_backup.ps1
+cd "<RUTA_PROYECTO>\coordinador-simple-mvp"
+.\ops\pull_encrypted_backup.ps1 -SshHost root@<IP_DROPLET>
 ```
 
 El script remoto valida `pg_dump` con `pg_restore --list`, valida el tar de
